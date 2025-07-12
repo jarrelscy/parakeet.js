@@ -193,6 +193,23 @@ Copy-paste the `loadModel()` and `transcribeFile()` functions into your app, adj
 
 ---
 
+## 🚀 Live Demo on Hugging Face Spaces
+
+Try the library instantly in your browser without any setup:
+
+**🦜 [Parakeet.js Demo on HF Spaces](https://huggingface.co/spaces/ysdede/parakeet.js-demo)**
+
+This demo showcases:
+- **WebGPU/WASM backend selection** - Choose the best performance for your device
+- **Real-time transcription** - Upload audio files and see instant results
+- **Performance metrics** - View detailed timing information and RTF scores
+- **Multi-threaded WASM** - Optimized for maximum performance
+- **Complete feature set** - All library capabilities in one place
+
+The demo is also available locally at `examples/hf-spaces-demo` and can be deployed to your own HF Space.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
