@@ -173,7 +173,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <h2>Parakeet JS React Demo</h2>
+      <h2>Parakeet JS React Demo - Using npm package</h2>
 
       <div className="controls">
         <p>
