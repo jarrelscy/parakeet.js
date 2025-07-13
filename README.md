@@ -224,4 +224,17 @@ The demo is also available locally at `examples/hf-spaces-demo` and can be deplo
 
 See `OPTIMIZATION_PLAN.md` for a timeline of performance tweaks and planned features.
 
+---
+
+## Credits
+
+This project builds upon the excellent work of:
+
+- **[istupakov](https://github.com/istupakov)** - For providing the [ONNX-ASR](https://github.com/istupakov/onnx-asr) repository, which served as the foundation and starting point for this JavaScript implementation
+- **[istupakov/parakeet-tdt-0.6b-v2-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx)** - For the original ONNX model exports and preprocessor implementations that made browser deployment possible
+- **ONNX Runtime Web** - For powering the browser-based inference engine
+- **ONNX Runtime Node** - For enabling high-performance server-side inference
+
+The Python-based ONNX-ASR project provided crucial insights into model handling, preprocessing pipelines, and served as a reference implementation during the development of this browser-compatible version.
+
 Happy hacking! 🎉
