@@ -61,7 +61,7 @@ const repoId = 'istupakov/parakeet-tdt-0.6b-v2-onnx';
 export async function loadParakeet() {
   const assets = await getParakeetModel(repoId, {
     backend: 'webgpu',
-    encoderQuant: 'fp32',
+    encoderQuant: 'fp16',
     decoderQuant: 'int8',
   });
 
@@ -139,7 +139,7 @@ import { getParakeetModel } from 'parakeet.js';
 const repoId = 'istupakov/parakeet-tdt-0.6b-v2-onnx';
 const { urls, filenames } = await getParakeetModel(repoId, {
   backend: 'webgpu', // 'webgpu' or 'wasm'
-  encoderQuant: 'fp32',    // 'fp32' or 'int8'
+  encoderQuant: 'fp16',    // 'fp16' | 'fp32' | 'int8'
   decoderQuant: 'int8',    // 'fp32' or 'int8'
   preprocessor: 'nemo128',
   progress: ({file,loaded,total}) => console.log(file, loaded/total)
@@ -185,7 +185,7 @@ The library supports two primary backends: `webgpu` and `wasm`.
 - **`webgpu` (Default):** This is the fastest option for modern desktop browsers. It runs in a hybrid configuration:
   - The heavy **encoder** model runs on the **GPU** (WebGPU) for maximum throughput.
   - The **decoder** model runs on the **CPU** (WASM). The decoder's architecture contains operations not fully supported by the ONNX Runtime WebGPU backend, causing it to fall back to WASM anyway. This configuration makes the behavior explicit and stable, avoiding performance issues and warnings.
-  - In this mode, the encoder must be `fp32`, but you can choose `fp32` or `int8` for the decoder.
+  - In this mode, the encoder uses the new `fp16` weights by default (with `fp32` available as a compatibility fallback). The decoder can be `fp32` or `int8`.
 
 - **`wasm`:** Both encoder and decoder run on the CPU. This is best for compatibility with older devices or environments without WebGPU support. Both models can be `fp32` or `int8`.
 
@@ -261,7 +261,7 @@ if (utterance_text.toLowerCase().includes(expected)) {
 | Property | Where | Effect |
 |----------|-------|--------|
 | `cpuThreads` | `fromUrls()` | Sets `ort.env.wasm.numThreads`; pick *cores-2* for best balance |
-| `encoderQuant` | `getParakeetModel()` | Selects `fp32` or `int8` model for the encoder. |
+| `encoderQuant` | `getParakeetModel()` | Selects `fp16`, `fp32` or `int8` weights for the encoder (`int8` auto-upgrades to `fp16` on WebGPU). |
 | `decoderQuant` | `getParakeetModel()` | Selects `fp32` or `int8` model for the decoder. |
 | `frameStride` | `transcribe()` | Trade-off latency vs accuracy |
 | `enableProfiling` | `fromUrls()` | Enables ORT profiler (JSON written to `/tmp/profile_*.json`) |
@@ -314,7 +314,7 @@ The demo is also available locally at `examples/hf-spaces-demo` and can be deplo
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `Some nodes were not assigned...` warning | When using the `webgpu` backend, ORT assigns minor operations (`Shape`, `Gather`, etc.) in the encoder to the CPU for efficiency. | This is expected and harmless. The heavy-lifting is still on the GPU. |
-| GPU memory still ~2.4 GB with INT8 selected | In WebGPU mode, the encoder must be `fp32`. The `int8` option only applies to the WASM backend or the decoder in hybrid mode. | This is the expected behavior for the `webgpu` backend. |
+| GPU memory still ~2.4 GB with INT8 selected | In WebGPU mode, the encoder always uses floating-point weights (`fp16` default, `fp32` fallback). The `int8` toggle only applies to the WASM backend or the decoder in hybrid mode. | This is the expected behavior for the `webgpu` backend. |
 | `Graph capture feature not available` error | Mixed EPs (CPU/GPU) or unsupported ops prevent GPU graph capture. | The library automatically retries without capture; safe to ignore. |
 
 ---

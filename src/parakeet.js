@@ -2,6 +2,56 @@ import { initOrt } from './backend.js';
 import { ParakeetTokenizer } from './tokenizer.js';
 import { OnnxPreprocessor } from './preprocessor.js';
 
+function float16ToFloat32Array(src) {
+  const dst = new Float32Array(src.length);
+  for (let i = 0; i < src.length; i++) {
+    const h = src[i];
+    const sign = (h & 0x8000) ? -1 : 1;
+    const exponent = (h & 0x7C00) >> 10;
+    const fraction = h & 0x03FF;
+
+    if (exponent === 0) {
+      if (fraction === 0) {
+        dst[i] = sign === -1 ? -0 : 0;
+      } else {
+        dst[i] = sign * Math.pow(2, -14) * (fraction / 1024);
+      }
+    } else if (exponent === 0x1F) {
+      dst[i] = fraction ? NaN : (sign === -1 ? -Infinity : Infinity);
+    } else {
+      dst[i] = sign * Math.pow(2, exponent - 15) * (1 + fraction / 1024);
+    }
+  }
+  return dst;
+}
+
+function tensorDataToFloat32(tensor) {
+  if (!tensor) return null;
+  const data = tensor.data;
+  if (!data) return null;
+
+  if (tensor.type === 'float32' || data instanceof Float32Array) {
+    return data;
+  }
+
+  if (tensor.type === 'float64' || data instanceof Float64Array) {
+    return Float32Array.from(data);
+  }
+
+  if (tensor.type === 'float16' || data instanceof Uint16Array) {
+    return float16ToFloat32Array(data);
+  }
+
+  // Float16Array is Stage-3 in ECMAScript – guard for environments that expose it.
+  if (typeof Float16Array !== 'undefined' && data instanceof Float16Array) {
+    const dst = new Float32Array(data.length);
+    for (let i = 0; i < data.length; i++) dst[i] = data[i];
+    return dst;
+  }
+
+  return Float32Array.from(data);
+}
+
 /**
  * Lightweight Parakeet model wrapper designed for browser usage.
  * Currently supports the *combined* decoder_joint-model ONNX (encoder+decoder+joiner in '
@@ -205,11 +255,17 @@ export class ParakeetModel {
     };
 
     const out = await this.joinerSession.run(feeds);
-    const logits = out['outputs'];
+    const logits = out['outputs'] ?? Object.values(out)[0];
+    if (!logits) {
+      throw new Error('Decoder session did not return outputs tensor');
+    }
 
     const vocab = this.tokenizer.id2token.length;
     const totalDim = logits.dims[3];
-    const data = logits.data;
+    const data = tensorDataToFloat32(logits);
+    if (!data) {
+      throw new Error('Decoder outputs missing data buffer');
+    }
 
     const tokenLogits = data.slice(0, vocab);
     const durLogits = data.slice(vocab, totalDim);
@@ -246,6 +302,7 @@ export class ParakeetModel {
       debug = false,
       skipCMVN = false,
       frameStride = 1,
+      encoderCache = null,
     } = opts;
 
     const perfEnabled = true; // always collect and log timings
@@ -262,26 +319,145 @@ export class ParakeetModel {
       ({ features, T, melBins } = await this.computeFeatures(audio, sampleRate));
     }
 
-    // 2. Encode entire utterance
-    const input = new this.ort.Tensor('float32', features, [1, melBins, T]);
-    const lenTensor = new this.ort.Tensor('int64', BigInt64Array.from([BigInt(T)]), [1]);
-    let enc;
-    if (perfEnabled) {
-      const s = performance.now();
-      const encOut = await this.encoderSession.run({ audio_signal: input, length: lenTensor });
-      tEncode = performance.now() - s;
-      enc = encOut['outputs'] ?? Object.values(encOut)[0];
-    } else {
-      const encOut = await this.encoderSession.run({ audio_signal: input, length: lenTensor });
-      enc = encOut['outputs'] ?? Object.values(encOut)[0];
+    // 2. Encode utterance (optionally using a cached encoder output)
+    let cachedTensor = null;
+    let cachedFrames = 0;
+    if (encoderCache) {
+      const dims = encoderCache.dims;
+      if (Array.isArray(dims) && dims.length === 3 && dims[0] === 1) {
+        cachedTensor = encoderCache;
+        cachedFrames = Math.max(0, dims[2] | 0);
+      } else if (debug) {
+        console.warn('[Parakeet] Ignoring encoderCache with invalid shape', dims);
+      }
     }
 
-    // Transpose encoder output [B, D, T] ➔ [T, D] for B=1
-    const [ , D, Tenc ] = enc.dims;
+    cachedFrames = Math.min(cachedFrames, T);
+    const framesToEncode = Math.max(0, T - cachedFrames);
+
+    const sliceFeatureFrames = (startFrame, frameCount) => {
+      if (frameCount <= 0) return new Float32Array(0);
+      if (startFrame === 0 && frameCount === T) return features;
+      const sliced = new Float32Array(melBins * frameCount);
+      for (let m = 0; m < melBins; m++) {
+        const srcOffset = m * T + startFrame;
+        const dstOffset = m * frameCount;
+        sliced.set(features.subarray(srcOffset, srcOffset + frameCount), dstOffset);
+      }
+      return sliced;
+    };
+
+    let encodeDuration = 0;
+    const runEncoder = async (featureBuffer, frameCount) => {
+      if (frameCount <= 0) return null;
+      const inputTensor = new this.ort.Tensor('float32', featureBuffer, [1, melBins, frameCount]);
+      const lenTensor = new this.ort.Tensor('int64', BigInt64Array.from([BigInt(frameCount)]), [1]);
+      let encOut;
+      if (perfEnabled) {
+        const s = performance.now();
+        encOut = await this.encoderSession.run({ audio_signal: inputTensor, length: lenTensor });
+        encodeDuration += performance.now() - s;
+      } else {
+        encOut = await this.encoderSession.run({ audio_signal: inputTensor, length: lenTensor });
+      }
+      const tensor = encOut['outputs'] ?? Object.values(encOut)[0];
+      if (!tensor) {
+        throw new Error('Encoder session did not return outputs tensor');
+      }
+      return tensor;
+    };
+
+    const truncateEncoderCache = (cacheTensor, targetFrames) => {
+      const dims = cacheTensor?.dims;
+      if (!Array.isArray(dims) || dims.length !== 3 || dims[0] !== 1) return null;
+      const [, Dcache, cacheTotalFrames] = dims;
+      if (cacheTotalFrames === targetFrames) return cacheTensor;
+      if (cacheTotalFrames < targetFrames) return null;
+      const cacheData = tensorDataToFloat32(cacheTensor);
+      if (!cacheData) return null;
+      const truncated = new Float32Array(Dcache * targetFrames);
+      for (let d = 0; d < Dcache; d++) {
+        const srcOffset = d * cacheTotalFrames;
+        const dstOffset = d * targetFrames;
+        truncated.set(cacheData.subarray(srcOffset, srcOffset + targetFrames), dstOffset);
+      }
+      return new this.ort.Tensor('float32', truncated, [1, Dcache, targetFrames]);
+    };
+
+    const concatEncoderOutputs = (cacheTensor, newTensor, keepFromCache, totalFrames) => {
+      const cacheDims = cacheTensor?.dims;
+      const newDims = newTensor?.dims;
+      if (!Array.isArray(cacheDims) || !Array.isArray(newDims)) return null;
+      if (cacheDims.length !== 3 || newDims.length !== 3) return null;
+      if (cacheDims[0] !== 1 || newDims[0] !== 1) return null;
+      const [, Dcache, cacheTotalFrames] = cacheDims;
+      const [, Dnew, newFrames] = newDims;
+      if (Dcache !== Dnew) return null;
+      if (keepFromCache > cacheTotalFrames) return null;
+      if (newFrames !== totalFrames - keepFromCache) return null;
+      const cacheData = tensorDataToFloat32(cacheTensor);
+      const newData = tensorDataToFloat32(newTensor);
+      if (!cacheData || !newData) return null;
+      const combined = new Float32Array(Dcache * totalFrames);
+      for (let d = 0; d < Dcache; d++) {
+        const dstOffset = d * totalFrames;
+        const cacheOffset = d * cacheTotalFrames;
+        const newOffset = d * newFrames;
+        combined.set(cacheData.subarray(cacheOffset, cacheOffset + keepFromCache), dstOffset);
+        combined.set(newData.subarray(newOffset, newOffset + newFrames), dstOffset + keepFromCache);
+      }
+      return new this.ort.Tensor('float32', combined, [1, Dcache, totalFrames]);
+    };
+
+    let encTensor = null;
+    if (T === 0) {
+      if (cachedTensor) {
+        encTensor = truncateEncoderCache(cachedTensor, 0) || cachedTensor;
+      }
+      if (!encTensor) {
+        encTensor = new this.ort.Tensor('float32', new Float32Array(0), [1, 0, 0]);
+      }
+    } else if (cachedTensor && cachedFrames > 0) {
+      if (framesToEncode > 0) {
+        const tailFeatures = sliceFeatureFrames(cachedFrames, framesToEncode);
+        const newTensor = await runEncoder(tailFeatures, framesToEncode);
+        if (newTensor) {
+          encTensor = concatEncoderOutputs(cachedTensor, newTensor, cachedFrames, T);
+        }
+        if (!encTensor) {
+          if (debug) {
+            console.warn('[Parakeet] Failed to merge encoder cache; re-encoding entire segment');
+          }
+          encTensor = await runEncoder(features, T);
+        }
+      } else {
+        encTensor = truncateEncoderCache(cachedTensor, T);
+        if (!encTensor) {
+          if (debug) {
+            console.warn('[Parakeet] Unable to reuse encoder cache; re-encoding entire segment');
+          }
+          encTensor = await runEncoder(features, T);
+        }
+      }
+    } else {
+      encTensor = await runEncoder(features, T);
+    }
+
+    if (perfEnabled) tEncode = encodeDuration;
+
+    if (!encTensor) {
+      throw new Error('Encoder session did not produce outputs tensor');
+    }
+
+    const encData = tensorDataToFloat32(encTensor);
+    if (!encData) {
+      throw new Error('Encoder outputs missing data buffer');
+    }
+    const [, D, Tenc] = encTensor.dims;
     const transposed = new Float32Array(Tenc * D);
     for (let d = 0; d < D; d++) {
       for (let t = 0; t < Tenc; t++) {
-        transposed[t * D + d] = enc.data[d * Tenc + t];
+        transposed[t * D + d] = encData[d * Tenc + t];
       }
     }
 
@@ -299,10 +475,10 @@ export class ParakeetModel {
 
     for (let t = 0; t < Tenc; ) {
       const frameBuf = transposed.subarray(t * D, (t + 1) * D);
-      const encTensor = new this.ort.Tensor('float32', frameBuf, [1, D, 1]);
+      const frameTensor = new this.ort.Tensor('float32', frameBuf, [1, D, 1]);
 
       const prevTok = ids.length ? ids[ids.length - 1] : this.blankId;
-      const { tokenLogits, step, newState } = await this._runCombinedStep(encTensor, prevTok, decoderState);
+      const { tokenLogits, step, newState } = await this._runCombinedStep(frameTensor, prevTok, decoderState);
       decoderState = newState;
 
       // Temperature scaling & argmax
@@ -364,7 +540,7 @@ export class ParakeetModel {
         total_ms: +( (performance.now() - t0).toFixed(1) ),
         rtf: +((audio.length / sampleRate) / ((performance.now() - t0) / 1000)).toFixed(2)
       } : null;
-      return { utterance_text: text, words: [], metrics, is_final: true };
+      return { utterance_text: text, words: [], metrics, encoder_output: encTensor, is_final: true };
     }
 
     // --- Build words & detailed token arrays ---------------------------
@@ -441,6 +617,7 @@ export class ParakeetModel {
         total_ms: +( (performance.now() - t0).toFixed(1) ),
         rtf: +((audio.length / sampleRate) / ((performance.now() - t0) / 1000)).toFixed(2)
       } : null,
+      encoder_output: encTensor,
       is_final: true,
     };
   }

@@ -11,6 +11,7 @@ _Last updated: 2025-07-13_
 | Model download | • IndexedDB cache<br/>• Pre-fetch repo file list → skip non-existent `.data` files | zero 404s + faster cold load |
 | Backend init | WASM configured with `numThreads = navigator.hardwareConcurrency`, `SIMD = true` | ≈2× speed-up on CPU fall-backs |
 | Execution providers | `webgpu` for encoder, **forced `wasm` for decoder** (hybrid) | Decode step time ↓ ~7× |
+| Encoder precision | Added FP16 model downloads + runtime conversion helpers | Encode stage bandwidth ↓ ~50 %, WebGPU encode speed ↑ ~20 % |
 | Session creation | Encoder session first → decoder after, avoiding double `initWasm()` race | stability + no “backend not available” errors |
 | Graph-capture | Enabled for WASM sessions; auto fallback when unsupported | ~15 % faster second run when pure WASM |
 | Timing | Always-on performance metrics returned from `transcribe()` and displayed in UI | Core feature for benchmarking & visibility |
@@ -21,12 +22,7 @@ _Last updated: 2025-07-13_
    • Process 4–8 encoder frames per `_runCombinedStep` dispatch.  
    • Expected: Decode wall-time ↓ 3–4× with negligible quality drop.
 
-2. **FP16 weights**  
-   • Export encoder & decoder with half-precision initialisers.  
-   • WASM/ SIMD handles FP16; WebGPU kernels halve VRAM traffic.  
-   • Expected: Encode ↓ 20 %, memory ↓ 50 %.
-
-3. **Pre-processing WebWorker**  
+2. **Pre-processing WebWorker**
    • Move WAV → Float32 + resample into a dedicated worker to overlap with model load.
 
 ## 3. Medium effort (days-week)

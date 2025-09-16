@@ -5,7 +5,7 @@ import './App.css';
 export default function App() {
   const repoId = 'istupakov/parakeet-tdt-0.6b-v2-onnx';
   const [backend, setBackend] = useState('webgpu-hybrid');
-  const [encoderQuant, setEncoderQuant] = useState('fp32');
+  const [encoderQuant, setEncoderQuant] = useState('fp16');
   const [decoderQuant, setDecoderQuant] = useState('int8');
   const [preprocessor, setPreprocessor] = useState('nemo128');
   const [status, setStatus] = useState('Idle');
@@ -27,7 +27,7 @@ export default function App() {
   // Auto-adjust quant presets when backend changes
   useEffect(() => {
     if (backend.startsWith('webgpu')) {
-      setEncoderQuant('fp32');
+      setEncoderQuant('fp16');
       setDecoderQuant('int8');
     } else {
       setEncoderQuant('int8');
@@ -193,8 +193,9 @@ export default function App() {
         <label>
           Encoder Quant:
           <select value={encoderQuant} onChange={e=>setEncoderQuant(e.target.value)}>
-            <option value="int8">int8 (faster)</option>
-            <option value="fp32">fp32 (higher quality)</option>
+            <option value="fp16">fp16 (WebGPU default)</option>
+            <option value="fp32">fp32 (higher precision)</option>
+            <option value="int8">int8 (WASM only)</option>
           </select>
         </label>
         {' '}
