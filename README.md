@@ -25,6 +25,115 @@ yarn add parakeet.js onnxruntime-web
 
 ---
 
+## Building the library locally
+
+Clone the repository and run the build step to produce publishable bundles in `dist/`:
+
+```bash
+npm install
+npm run build
+```
+
+This generates both ESM (`dist/index.js`) and CommonJS (`dist/index.cjs`) outputs that can be consumed from bundlers or directly from a `<script type="module">` tag in a browser app.
+
+---
+
+## Using Parakeet.js in a JavaScript/HTML app
+
+Once you have built the library (or installed it from npm), you can import the bundled entry point straight from modern browser environments. Two common integration patterns are shown below.
+
+### 1. Install via npm and use with your bundler (recommended)
+
+Most build tools (Vite, Next.js, webpack, etc.) can consume the ESM bundle exported from `parakeet.js`.
+
+```bash
+npm install parakeet.js onnxruntime-web
+```
+
+Create an app entry file (for example `src/main.js`) that uses the exported helpers:
+
+```js
+// src/main.js
+import { getParakeetModel, ParakeetModel } from 'parakeet.js';
+
+const repoId = 'istupakov/parakeet-tdt-0.6b-v2-onnx';
+
+export async function loadParakeet() {
+  const assets = await getParakeetModel(repoId, {
+    backend: 'webgpu',
+    encoderQuant: 'fp32',
+    decoderQuant: 'int8',
+  });
+
+  const model = await ParakeetModel.fromUrls({
+    ...assets.urls,
+    filenames: assets.filenames,
+    backend: 'webgpu',
+  });
+
+  return model;
+}
+```
+
+Your HTML entry point simply imports the file that your bundler builds:
+
+```html
+<!-- index.html -->
+<body>
+  <button id="warmup">Warm up model</button>
+  <script type="module">
+    import { loadParakeet } from './src/main.js';
+
+    document.getElementById('warmup').addEventListener('click', async () => {
+      const model = await loadParakeet();
+      console.log('Model ready', model);
+    });
+  </script>
+</body>
+```
+
+Bundle/serve the project with your preferred tooling (e.g. `npm run dev` for Vite or `npm run build` for webpack). The bundler resolves the `parakeet.js` dependency, places the runtime code into your output bundle, and ensures `onnxruntime-web` is included.
+
+### 2. Import directly from a `<script type="module">`
+
+If you do not have a build step, you can load the prebuilt bundle directly from a CDN, from the repository's GitHub Pages build, or from the local `dist/` folder produced by `npm run build`.
+
+```html
+<!-- Using jsDelivr CDN -->
+<script type="module">
+  import { getParakeetModel, ParakeetModel } from 'https://cdn.jsdelivr.net/npm/parakeet.js/dist/index.js';
+
+  async function bootstrap() {
+    const repoId = 'istupakov/parakeet-tdt-0.6b-v2-onnx';
+    const assets = await getParakeetModel(repoId, { backend: 'webgpu' });
+    const model = await ParakeetModel.fromUrls({
+      ...assets.urls,
+      filenames: assets.filenames,
+      backend: 'webgpu',
+    });
+
+    console.log('Ready to transcribe!', model);
+  }
+
+  bootstrap();
+</script>
+```
+
+When hosting the files yourself, swap the CDN URL for a relative path such as `/dist/index.js`. The module-friendly format means modern browsers can load the library without any additional tooling.
+
+#### Getting the latest bundle from GitHub Pages
+
+Every push to the `main` branch automatically publishes the freshly built `dist/` contents to GitHub Pages. Once GitHub Pages is enabled for the repository, the current bundles are available as plain JavaScript files at:
+
+```
+https://<your-github-username>.github.io/parakeet.js/index.js
+https://<your-github-username>.github.io/parakeet.js/index.cjs
+```
+
+Replace `<your-github-username>` with the actual account or organization name that owns the repository. These URLs always point at the most recent build produced by the workflow, making it easy to link directly to the hosted files without downloading a zip archive.
+
+---
+
 ## Model assets
 
 We host ready-to-use ONNX exports on the HuggingFace Hub:
