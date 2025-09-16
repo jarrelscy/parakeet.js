@@ -166,7 +166,7 @@ export async function getModelText(repoId, filename, options = {}) {
  * Convenience function to get all Parakeet model files for a given architecture.
  * @param {string} repoId HF repo (e.g., 'nvidia/parakeet-tdt-1.1b')
  * @param {Object} [options]
- * @param {('int8'|'fp32')} [options.encoderQuant='int8'] Encoder quantization
+ * @param {('int8'|'fp32'|'fp16')} [options.encoderQuant='int8'] Encoder quantization
  * @param {('int8'|'fp32')} [options.decoderQuant='int8'] Decoder quantization
  * @param {('nemo80'|'nemo128')} [options.preprocessor='nemo128'] Preprocessor variant
  * @param {('webgpu'|'wasm')} [options.backend='webgpu'] Backend to use
@@ -175,18 +175,24 @@ export async function getModelText(repoId, filename, options = {}) {
  */
 export async function getParakeetModel(repoId, options = {}) {
   const { encoderQuant = 'int8', decoderQuant = 'int8', preprocessor = 'nemo128', backend = 'webgpu', progress } = options;
-  
+
   // Decide quantisation per component
   let encoderQ = encoderQuant;
   let decoderQ = decoderQuant;
 
   if (backend.startsWith('webgpu') && encoderQ === 'int8') {
-    console.warn('[Hub] Forcing encoder to fp32 on WebGPU (int8 unsupported)');
-    encoderQ = 'fp32';
+    console.warn('[Hub] Forcing encoder to fp16 on WebGPU (int8 unsupported)');
+    encoderQ = 'fp16';
   }
 
-  const encoderSuffix = encoderQ === 'int8' ? '.int8.onnx' : '.onnx';
-  const decoderSuffix = decoderQ === 'int8' ? '.int8.onnx' : '.onnx';
+  const quantSuffix = {
+    int8: '.int8.onnx',
+    fp16: '.fp16.onnx',
+    fp32: '.onnx',
+  };
+
+  const encoderSuffix = quantSuffix[encoderQ] || '.onnx';
+  const decoderSuffix = quantSuffix[decoderQ] || '.onnx';
 
   const encoderName = `encoder-model${encoderSuffix}`;
   const decoderName = `decoder_joint-model${decoderSuffix}`;
