@@ -248,11 +248,14 @@ export class ParakeetModel {
       frameStride = 1,
       ngramBias: optNgramBias,
       ngramAlpha: optNgramAlpha,
+      blankPenalty: optBlankPenalty,
     } = opts;
 
     const ngramBias = optNgramBias ?? opts.ngram_bias ?? null;
     const ngramAlpha = (typeof optNgramAlpha === 'number' ? optNgramAlpha : undefined) ??
       (typeof opts.ngram_alpha === 'number' ? opts.ngram_alpha : 0.1);
+    const blankPenalty = (typeof optBlankPenalty === 'number' ? optBlankPenalty : undefined) ??
+      (typeof opts.blank_penalty === 'number' ? opts.blank_penalty : 0);
 
     const lookupNgramBias = (biasTree, history, candidateId) => {
       if (!biasTree) return null;
@@ -341,6 +344,9 @@ export class ParakeetModel {
       decoderState = newState;
 
       // Temperature scaling & argmax
+      if (blankPenalty !== 0 && this.blankId < tokenLogits.length) {
+        tokenLogits[this.blankId] -= blankPenalty;
+      }
       let maxVal = -Infinity, maxId = 0;
       for (let i = 0; i < tokenLogits.length; i++) {
         if (ngramBias && i !== this.blankId) {
