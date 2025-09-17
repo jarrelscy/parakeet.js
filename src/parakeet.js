@@ -246,7 +246,42 @@ export class ParakeetModel {
       debug = false,
       skipCMVN = false,
       frameStride = 1,
+      ngramBias: optNgramBias,
+      ngramAlpha: optNgramAlpha,
     } = opts;
+
+    const ngramBias = optNgramBias ?? opts.ngram_bias ?? null;
+    const ngramAlpha = (typeof optNgramAlpha === 'number' ? optNgramAlpha : undefined) ??
+      (typeof opts.ngram_alpha === 'number' ? opts.ngram_alpha : 0.1);
+
+    const lookupNgramBias = (biasTree, history, candidateId) => {
+      if (!biasTree) return null;
+      const histLength = history.length;
+
+      for (let n = histLength; n >= 0; n--) {
+        let node = biasTree;
+        let valid = true;
+
+        if (n > 0) {
+          const start = histLength - n;
+          for (let i = start; i < histLength; i++) {
+            node = node?.[history[i]];
+            if (!node || typeof node !== 'object') {
+              valid = false;
+              break;
+            }
+          }
+          if (!valid) continue;
+        }
+
+        const candidateNode = node?.[candidateId];
+        if (candidateNode && typeof candidateNode === 'object' && typeof candidateNode.log_prob === 'number') {
+          return candidateNode.log_prob;
+        }
+      }
+
+      return null;
+    };
 
     const perfEnabled = true; // always collect and log timings
     let t0, tPreproc = 0, tEncode = 0, tDecode = 0, tToken = 0;
@@ -308,6 +343,12 @@ export class ParakeetModel {
       // Temperature scaling & argmax
       let maxVal = -Infinity, maxId = 0;
       for (let i = 0; i < tokenLogits.length; i++) {
+        if (ngramBias && i !== this.blankId) {
+          const biasLogProb = lookupNgramBias(ngramBias, ids, i);
+          if (typeof biasLogProb === 'number') {
+            tokenLogits[i] += ngramAlpha * biasLogProb;
+          }
+        }
         const v = tokenLogits[i] / temperature;
         if (v > maxVal) { maxVal = v; maxId = i; }
       }
