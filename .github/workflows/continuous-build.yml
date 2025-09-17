@@ -11,12 +11,12 @@ on:
       - opened
       - synchronize
       - reopened
-      - closed
+      - ready_for_review
+  merge_group:
   workflow_dispatch:
 
 jobs:
   build:
-    if: github.event_name != 'pull_request' || github.event.action != 'closed' || github.event.pull_request.merged == true
     name: Build library
     runs-on: ubuntu-latest
 
