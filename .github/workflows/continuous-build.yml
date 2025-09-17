@@ -2,11 +2,21 @@ name: Continuous Build
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - closed
+  workflow_dispatch:
 
 jobs:
   build:
+    if: github.event_name != 'pull_request' || github.event.action != 'closed' || github.event.pull_request.merged == true
     name: Build library
     runs-on: ubuntu-latest
 
