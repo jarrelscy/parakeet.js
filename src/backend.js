@@ -47,11 +47,11 @@ export async function initOrt({ backend = 'webgpu', wasmPaths, numThreads } = {}
     throw new Error('ONNX Runtime Web loaded but env is not available. This might be a bundling issue.');
   }
   
-  // Set up WASM paths first (needed for all backends)
-  if (!ort.env.wasm.wasmPaths) {
-    // Use the same version as in package.json
-    const ver = '1.22.0-dev.20250409-89f8206ba4';
-    ort.env.wasm.wasmPaths = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ver}/dist/`;
+  // Set up WASM paths if explicitly provided. The bundled ONNX Runtime already
+  // includes the WASM assets so we only override when a custom path is
+  // supplied (for example when self-hosting the binaries).
+  if (wasmPaths) {
+    ort.env.wasm.wasmPaths = wasmPaths;
   }
 
   // Configure WASM for better performance

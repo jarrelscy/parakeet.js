@@ -11,5 +11,5 @@ export default defineConfig({
   minify: false,
   platform: 'browser',
   globalName: 'Parakeet',
-  external: ['onnxruntime-web'],
+  noExternal: ['onnxruntime-web'],
 });
