@@ -257,8 +257,10 @@ export class ParakeetModel {
     const blankPenalty = (typeof optBlankPenalty === 'number' ? optBlankPenalty : undefined) ??
       (typeof opts.blank_penalty === 'number' ? opts.blank_penalty : 0);
 
-    const lookupNgramBias = (biasTree, history, candidateId) => {
-      if (!biasTree) return null;
+    const prepareNgramContext = (biasTree, history) => {
+      if (!biasTree || typeof biasTree !== 'object') return null;
+
+      const contexts = [];
       const histLength = history.length;
 
       for (let n = histLength; n >= 0; n--) {
@@ -268,22 +270,31 @@ export class ParakeetModel {
         if (n > 0) {
           const start = histLength - n;
           for (let i = start; i < histLength; i++) {
-            node = node?.[history[i]];
-            if (!node || typeof node !== 'object') {
+            const next = node?.[history[i]];
+            if (!next || typeof next !== 'object') {
               valid = false;
               break;
             }
+            node = next;
           }
-          if (!valid) continue;
         }
 
-        const candidateNode = node?.[candidateId];
-        if (candidateNode && typeof candidateNode === 'object' && typeof candidateNode.log_prob === 'number') {
-          return candidateNode.log_prob;
+        if (valid && node && typeof node === 'object') {
+          contexts.push(node);
         }
       }
 
-      return null;
+      if (!contexts.length) return null;
+
+      let defaultLogProb = null;
+      for (const node of contexts) {
+        if (typeof node.def_prob === 'number') {
+          defaultLogProb = node.def_prob;
+          break;
+        }
+      }
+
+      return { contexts, defaultLogProb };
     };
 
     const perfEnabled = true; // always collect and log timings
@@ -348,10 +359,24 @@ export class ParakeetModel {
         tokenLogits[this.blankId] -= blankPenalty;
       }
       let maxVal = -Infinity, maxId = 0;
+      const ngramContext = ngramBias ? prepareNgramContext(ngramBias, ids) : null;
+
       for (let i = 0; i < tokenLogits.length; i++) {
-        if (ngramBias && i !== this.blankId) {
-          const biasLogProb = lookupNgramBias(ngramBias, ids, i);
-          if (typeof biasLogProb === 'number') {
+        if (ngramContext && i !== this.blankId) {
+          let biasLogProb = null;
+          for (const node of ngramContext.contexts) {
+            const candidateNode = node?.[i];
+            if (candidateNode && typeof candidateNode === 'object' && typeof candidateNode.log_prob === 'number') {
+              biasLogProb = candidateNode.log_prob;
+              break;
+            }
+          }
+
+          if (biasLogProb === null && typeof ngramContext.defaultLogProb === 'number') {
+            biasLogProb = ngramContext.defaultLogProb;
+          }
+
+          if (biasLogProb !== null) {
             tokenLogits[i] += ngramAlpha * biasLogProb;
           }
         }
