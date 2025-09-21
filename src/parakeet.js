@@ -257,44 +257,56 @@ export class ParakeetModel {
     const blankPenalty = (typeof optBlankPenalty === 'number' ? optBlankPenalty : undefined) ??
       (typeof opts.blank_penalty === 'number' ? opts.blank_penalty : 0);
 
+    const toFiniteNumber = (value) => {
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+      if (typeof value === 'string' && value.trim() !== '') {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed)) return parsed;
+      }
+      return null;
+    };
+
     const prepareNgramContext = (biasTree, history) => {
       if (!biasTree || typeof biasTree !== 'object') return null;
 
-      const contexts = [];
       const histLength = history.length;
+      const contexts = new Array(histLength + 1);
 
-      for (let n = histLength; n >= 0; n--) {
+      for (let start = 0; start <= histLength; start++) {
         let node = biasTree;
         let valid = true;
 
-        if (n > 0) {
-          const start = histLength - n;
-          for (let i = start; i < histLength; i++) {
-            const next = node?.[history[i]];
-            if (!next || typeof next !== 'object') {
-              valid = false;
-              break;
-            }
-            node = next;
+        for (let i = start; i < histLength; i++) {
+          const next = node?.[history[i]];
+          if (!next || typeof next !== 'object') {
+            valid = false;
+            break;
           }
+          node = next;
         }
 
-        if (valid && node && typeof node === 'object') {
-          contexts.push(node);
-        }
+        contexts[start] = valid ? node : null;
       }
 
-      if (!contexts.length) return null;
+      // Pre-compute the default probability fallback for each suffix
+      const defaultByStart = new Array(histLength + 1);
+      let fallback = toFiniteNumber(biasTree.def_prob);
+      defaultByStart[histLength] = fallback;
 
-      let defaultLogProb = null;
-      for (const node of contexts) {
-        if (typeof node.def_prob === 'number') {
-          defaultLogProb = node.def_prob;
-          break;
+      for (let idx = histLength - 1; idx >= 0; idx--) {
+        const node = contexts[idx];
+        const nodeDefault = node ? toFiniteNumber(node.def_prob) : null;
+        if (nodeDefault !== null) {
+          fallback = nodeDefault;
         }
+        defaultByStart[idx] = fallback;
       }
 
-      return { contexts, defaultLogProb };
+      return {
+        contexts,
+        defaultByStart,
+        defaultLogProb: defaultByStart[0],
+      };
     };
 
     const perfEnabled = true; // always collect and log timings
@@ -364,15 +376,20 @@ export class ParakeetModel {
       for (let i = 0; i < tokenLogits.length; i++) {
         if (ngramContext && i !== this.blankId) {
           let biasLogProb = null;
-          for (const node of ngramContext.contexts) {
+          for (let idx = 0; idx < ngramContext.contexts.length; idx++) {
+            const node = ngramContext.contexts[idx];
+            if (!node) continue;
             const candidateNode = node?.[i];
-            if (candidateNode && typeof candidateNode === 'object' && typeof candidateNode.log_prob === 'number') {
-              biasLogProb = candidateNode.log_prob;
-              break;
+            if (candidateNode && typeof candidateNode === 'object') {
+              const logProb = toFiniteNumber(candidateNode.log_prob);
+              if (logProb !== null) {
+                biasLogProb = logProb;
+                break;
+              }
             }
           }
 
-          if (biasLogProb === null && typeof ngramContext.defaultLogProb === 'number') {
+          if (biasLogProb === null && ngramContext.defaultLogProb !== null) {
             biasLogProb = ngramContext.defaultLogProb;
           }
 
