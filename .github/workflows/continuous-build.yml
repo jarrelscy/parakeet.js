@@ -40,7 +40,7 @@ jobs:
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
 
       - name: Refresh audiosave transcripts
-        run: uv run --with numpy --with onnx-asr python scripts/generate_audiosave_transcripts.py
+        run: uv run --with numpy --with onnxruntime --with huggingface-hub --with onnx-asr python scripts/generate_audiosave_transcripts.py
 
       - name: Run tests
         run: npm test

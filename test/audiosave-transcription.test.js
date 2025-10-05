@@ -158,7 +158,7 @@ async function getModel() {
       modelConfig = await getParakeetModel('jarrelscy/parakeet-tdt-0.6b-v2-onnx', {
         backend: 'wasm',
         encoderQuant: 'fp32',
-        decoderQuant: 'fp32',
+        decoderQuant: 'int8',
       });
     }
 
@@ -167,7 +167,7 @@ async function getModel() {
       filenames: modelConfig.filenames,
       backend: 'wasm',
       wasmPaths: wasmUrl,
-      decoderQuant: 'fp32',
+      decoderQuant: 'int8',
       encoderQuant: 'fp32',
     });
   }
@@ -192,7 +192,7 @@ async function collectAudioPairs() {
     } catch (err) {
       const guidance = [
         `Missing transcript file for ${wavFile}`,
-        'Run `uv run --with numpy --with onnx-asr python scripts/generate_audiosave_transcripts.py` to refresh references.',
+        'Run `uv run --with numpy --with onnxruntime --with huggingface-hub --with onnx-asr python scripts/generate_audiosave_transcripts.py` to refresh references.',
       ].join('\n');
       throw new Error(guidance);
     }
