@@ -95,6 +95,9 @@ async function readBlobFile(path, options) {
 fs.promises.readFile = async (path, options) => {
   const blobResult = await readBlobFile(path, options);
   if (blobResult !== null) return blobResult;
+  if (typeof path === 'string' && path.startsWith('file://')) {
+    return originalFsReadFile(fileURLToPath(path), options);
+  }
   return originalFsReadFile(path, options);
 };
 

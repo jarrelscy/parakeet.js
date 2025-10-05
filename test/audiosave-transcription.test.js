@@ -115,18 +115,59 @@ async function getModel() {
     const wasmDirUrl = pathToFileURL(wasmDir).href;
     const wasmUrl = wasmDirUrl.endsWith('/') ? wasmDirUrl : `${wasmDirUrl}/`;
 
-    const hubConfig = await getParakeetModel('jarrelscy/parakeet-tdt-0.6b-v2-onnx', {
-      backend: 'wasm',
-      encoderQuant: 'fp32',
-      decoderQuant: 'int8',
-    });
+    const localRepo = process.env.PARAKEET_LOCAL_MODEL_DIR;
+    let modelConfig;
+
+    if (localRepo) {
+      const base = path.resolve(projectRoot, localRepo);
+      async function ensure(name) {
+        const filePath = path.join(base, name);
+        try {
+          await fs.access(filePath);
+          return filePath;
+        } catch (err) {
+          if (err.code === 'ENOENT') return null;
+          throw err;
+        }
+      }
+
+      const encoderPath = await ensure('encoder-model.onnx');
+      const encoderDataPath = await ensure('encoder-model.onnx.data');
+      const decoderPath = await ensure('decoder_joint-model.onnx');
+      const vocabPath = await ensure('vocab.txt');
+      const preprocPath = await ensure('nemo128.onnx');
+
+      modelConfig = {
+        urls: {
+          encoderUrl: encoderPath,
+          encoderDataUrl: encoderDataPath,
+          decoderUrl: decoderPath,
+          tokenizerUrl: vocabPath ? pathToFileURL(vocabPath).href : null,
+          preprocessorUrl: preprocPath,
+        },
+        filenames: {
+          encoder: 'encoder-model.onnx',
+          decoder: 'decoder_joint-model.onnx',
+        },
+      };
+
+      if (!encoderPath || !decoderPath || !vocabPath || !preprocPath) {
+        throw new Error(`PARAKEET_LOCAL_MODEL_DIR is missing required files in ${base}`);
+      }
+    } else {
+      modelConfig = await getParakeetModel('jarrelscy/parakeet-tdt-0.6b-v2-onnx', {
+        backend: 'wasm',
+        encoderQuant: 'fp32',
+        decoderQuant: 'fp32',
+      });
+    }
 
     modelPromise = ParakeetModel.fromUrls({
-      ...hubConfig.urls,
-      filenames: hubConfig.filenames,
+      ...modelConfig.urls,
+      filenames: modelConfig.filenames,
       backend: 'wasm',
       wasmPaths: wasmUrl,
-      decoderQuant: 'int8',
+      decoderQuant: 'fp32',
       encoderQuant: 'fp32',
     });
   }

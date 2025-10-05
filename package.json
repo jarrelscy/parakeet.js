@@ -32,7 +32,7 @@
     "test": "node --test"
   },
   "dependencies": {
-    "onnxruntime-web": "1.22.0-dev.20250409-89f8206ba4"
+    "onnxruntime-web": "^1.23.0"
   },
   "author": "Yunus Seyhan Dede",
   "license": "MIT",

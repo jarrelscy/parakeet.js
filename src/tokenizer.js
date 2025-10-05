@@ -38,17 +38,18 @@ export class ParakeetTokenizer {
    * @returns {string}
    */
   decode(ids) {
-    let text = '';
+    const pieces = [];
     for (const id of ids) {
       const token = this.id2token[id];
-      if (token === undefined) continue;
-      if (token === this.blankToken) continue;
-      if (token.startsWith('▁')) {
-        text += ' ' + token.slice(1);
-      } else {
-        text += token;
-      }
+      if (token === undefined || token === this.blankToken) continue;
+      pieces.push(token.replace(/\u2581/g, ' '));
     }
-    return text.trim();
+
+    const raw = pieces.join('');
+    if (!raw) return '';
+
+    // Mirror the spacing cleanup implemented in onnx_asr so our outputs
+    // match the Python reference decoder byte-for-byte.
+    return raw.replace(/(^\s|\s\B|(\s)\b)/g, (_, _discard, keep) => (keep ? ' ' : ''));
   }
-} 
+}
