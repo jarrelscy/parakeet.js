@@ -10,6 +10,12 @@
  * @param {string} [opts.wasmPaths] Optional path prefix for WASM binaries.
  * @returns {Promise<typeof import('onnxruntime-web').default>}
  */
+let selectedBackend = null;
+
+export function getSelectedBackend() {
+  return selectedBackend;
+}
+
 export async function initOrt({ backend = 'webgpu', wasmPaths, numThreads } = {}) {
   // Dynamic import to handle Vite bundling issues
   let ort;
@@ -91,8 +97,9 @@ export async function initOrt({ backend = 'webgpu', wasmPaths, numThreads } = {}
     }
   }
 
-  // Store the final backend choice for use in model selection
-  ort._selectedBackend = backend;
+  // Store the final backend choice for use in model selection without mutating the
+  // ONNX Runtime namespace (which can be frozen in some environments).
+  selectedBackend = backend;
 
   // Return the ort module for use in creating sessions and tensors
   return ort;
