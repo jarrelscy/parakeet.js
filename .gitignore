@@ -9,4 +9,3 @@ hf-cache/
 .env.production.local
 *.pem
 docs/
-scripts/
