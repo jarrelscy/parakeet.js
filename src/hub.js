@@ -16,12 +16,19 @@ function getAccessToken() {
   return envToken || globalToken || '';
 }
 
-function fetchWithAuth(url, options = {}) {
+async function fetchWithAuth(url, options = {}) {
   const token = getAccessToken();
   const target = url instanceof URL ? url.toString() : url;
   const isHttp = typeof target === 'string' ? /^https?:/i.test(target) : false;
   if (!token || !isHttp) {
-    return fetch(url, options);
+    try {
+      return await fetch(url, options);
+    } catch (err) {
+      if (await shouldTryNodeFetch(err)) {
+        return nodeFetch(target, options);
+      }
+      throw err;
+    }
   }
 
   const nextOptions = { ...options };
@@ -42,7 +49,97 @@ function fetchWithAuth(url, options = {}) {
     nextOptions.headers = headersInit;
   }
 
-  return fetch(url, nextOptions);
+  try {
+    return await fetch(url, nextOptions);
+  } catch (err) {
+    if (await shouldTryNodeFetch(err)) {
+      return nodeFetch(target, nextOptions);
+    }
+    throw err;
+  }
+}
+
+async function shouldTryNodeFetch(err) {
+  if (!err) return false;
+  const codes = new Set();
+  if (err.code) codes.add(err.code);
+  if (err.cause?.code) codes.add(err.cause.code);
+  if (Array.isArray(err.errors)) {
+    for (const nested of err.errors) {
+      if (nested?.code) codes.add(nested.code);
+    }
+  }
+  if (codes.has('ENETUNREACH') || codes.has('ECONNREFUSED')) {
+    return await canUseNodeFetch();
+  }
+  const message = typeof err.message === 'string' ? err.message : '';
+  const causeMessage = typeof err.cause?.message === 'string' ? err.cause.message : '';
+  const combined = `${message} ${causeMessage}`;
+  if (combined.includes('ENETUNREACH') || combined.includes('proxy') || combined.includes('fetch failed')) {
+    return await canUseNodeFetch();
+  }
+  return false;
+}
+
+let childProcessModulePromise = null;
+
+async function canUseNodeFetch() {
+  if (typeof process === 'undefined' || !process?.versions?.node) return false;
+  try {
+    await loadChildProcessModule();
+    return true;
+  } catch (err) {
+    console.warn('[Hub] Failed to prepare Node HTTPS fallback', err);
+    return false;
+  }
+}
+
+async function loadChildProcessModule() {
+  if (!childProcessModulePromise) {
+    childProcessModulePromise = import('node:child_process');
+  }
+  return childProcessModulePromise;
+}
+
+async function nodeFetch(url, options = {}) {
+  const childProcessMod = await loadChildProcessModule();
+  const target = typeof url === 'string' ? url : url.toString();
+  const headers = new Headers(options.headers || {});
+  const headerArgs = [];
+  for (const [key, value] of headers.entries()) {
+    headerArgs.push('-H', `${key}: ${value}`);
+  }
+
+  const args = ['-L', '--silent', '--show-error', '--fail'];
+  args.push(...headerArgs);
+  args.push(target);
+
+  return new Promise((resolve, reject) => {
+    const child = childProcessMod.spawn('curl', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    const stderrChunks = [];
+    const stdoutChunks = [];
+
+    child.stdout.on('data', (chunk) => stdoutChunks.push(chunk));
+    child.stderr.on('data', (chunk) => stderrChunks.push(chunk));
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0) {
+        const stderr = Buffer.concat(stderrChunks).toString() || `curl exited with code ${code}`;
+        reject(new Error(stderr));
+        return;
+      }
+
+      const bodyBuffer = Buffer.concat(stdoutChunks);
+      const response = new Response(bodyBuffer, {
+        status: 200,
+        headers: new Headers(),
+      });
+      resolve(response);
+    });
+  });
 }
 
 async function listRepoFiles(repoId, revision = 'main') {

@@ -1,5 +1,17 @@
-import { readFile } from 'node:fs/promises';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { Agent, ProxyAgent, setGlobalDispatcher } from 'undici';
+
+if (typeof process !== 'undefined' && process?.env) {
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+  if (proxyUrl) {
+    setGlobalDispatcher(new ProxyAgent(proxyUrl));
+  } else {
+    setGlobalDispatcher(new Agent());
+  }
+} else {
+  setGlobalDispatcher(new Agent());
+}
 
 const globalScope = globalThis;
 
@@ -50,29 +62,40 @@ if (!globalScope.Blob) {
 const blobStore = new Map();
 let blobSeq = 0;
 
-const originalCreateObjectURL = URL.createObjectURL?.bind(URL);
-const originalRevokeObjectURL = URL.revokeObjectURL?.bind(URL);
-
 URL.createObjectURL = (blob) => {
-  if (originalCreateObjectURL) {
-    try {
-      return originalCreateObjectURL(blob);
-    } catch (err) {
-      // Fall through to custom implementation
-    }
-  }
   const id = `blob:parakeet-test-${++blobSeq}`;
   blobStore.set(id, blob);
   return id;
 };
 
 URL.revokeObjectURL = (url) => {
-  if (blobStore.delete(url)) {
-    return;
+  blobStore.delete(url);
+};
+
+const originalFsReadFile = fs.promises.readFile.bind(fs.promises);
+
+async function readBlobFile(path, options) {
+  if (typeof path === 'string' && path.startsWith('blob:parakeet-test-')) {
+    const blob = blobStore.get(path);
+    if (!blob) {
+      throw new Error(`No blob found for URL ${path}`);
+    }
+    const buffer = Buffer.from(await blob.arrayBuffer());
+    if (options && typeof options === 'object' && 'encoding' in options && options.encoding) {
+      return buffer.toString(options.encoding);
+    }
+    if (typeof options === 'string') {
+      return buffer.toString(options);
+    }
+    return buffer;
   }
-  if (originalRevokeObjectURL) {
-    originalRevokeObjectURL(url);
-  }
+  return null;
+}
+
+fs.promises.readFile = async (path, options) => {
+  const blobResult = await readBlobFile(path, options);
+  if (blobResult !== null) return blobResult;
+  return originalFsReadFile(path, options);
 };
 
 const originalFetch = globalScope.fetch.bind(globalScope);
@@ -102,7 +125,7 @@ globalScope.fetch = async function patchedFetch(resource, init) {
 
     if (url.startsWith('file://')) {
       const path = fileURLToPath(url);
-      const data = await readFile(path);
+      const data = await fs.promises.readFile(path);
       return new Response(data);
     }
   }
