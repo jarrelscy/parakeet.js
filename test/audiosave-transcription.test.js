@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { spawn } from 'node:child_process';
 
 import './helpers/setup-node-env.js';
 
@@ -174,7 +175,142 @@ async function getModel() {
   return modelPromise;
 }
 
+class SkipTestError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'SkipTestError';
+  }
+}
+
+let pythonReferencePromise;
+
+async function ensurePythonTranscripts() {
+  if (process.env.PARAKEET_SKIP_PYTHON === '1') {
+    return;
+  }
+
+  if (!pythonReferencePromise) {
+    pythonReferencePromise = (async () => {
+      const pythonBin = process.env.PYTHON || process.env.PYTHON_BIN || 'python3';
+      const localRepo = process.env.PARAKEET_LOCAL_MODEL_DIR
+        ? path.resolve(projectRoot, process.env.PARAKEET_LOCAL_MODEL_DIR)
+        : '';
+
+      const script = `import os
+import sys
+import wave
+
+EXIT_SKIP = 75
+
+audio_dir = sys.argv[1]
+model_dir = sys.argv[2] or None
+
+try:
+    import numpy as np
+except ModuleNotFoundError:
+    sys.stderr.write('python reference skipped: numpy module not found\\n')
+    sys.exit(EXIT_SKIP)
+
+try:
+    import onnx_asr
+except ModuleNotFoundError:
+    sys.stderr.write('python reference skipped: onnx_asr module not found\\n')
+    sys.exit(EXIT_SKIP)
+
+
+def load_audio(path):
+    with wave.open(path, 'rb') as wav:
+        if wav.getnchannels() != 1:
+            raise RuntimeError(f"{path} must be mono")
+        if wav.getframerate() != 16000:
+            raise RuntimeError(f"{path} must be 16000Hz")
+        if wav.getsampwidth() != 2:
+            raise RuntimeError(f"{path} must be 16-bit PCM")
+        frames = wav.readframes(wav.getnframes())
+    samples = np.frombuffer(frames, dtype='<i2').astype('float32') / 32768.0
+    return samples
+
+
+model = onnx_asr.load_model('nemo-parakeet-tdt-0.6b-v2', model_dir)
+
+for entry in sorted(os.listdir(audio_dir)):
+    if not entry.endswith('.wav'):
+        continue
+    wav_path = os.path.join(audio_dir, entry)
+    samples = load_audio(wav_path)
+    text = model.recognize(samples, sample_rate=16000)
+    out_path = os.path.join(audio_dir, entry[:-4] + '.txt')
+    with open(out_path, 'w', encoding='utf-8') as fh:
+        fh.write(text)
+sys.exit(0)
+`;
+
+      const args = ['-', audioDir, localRepo];
+
+      let stdout = '';
+      let stderr = '';
+
+      const runResult = await new Promise((resolve, reject) => {
+        const child = spawn(pythonBin, args, {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: process.env,
+        });
+
+        child.stdin.end(script);
+
+        child.stdout.on('data', (chunk) => {
+          stdout += chunk.toString();
+        });
+
+        child.stderr.on('data', (chunk) => {
+          stderr += chunk.toString();
+        });
+
+        child.on('error', (err) => {
+          reject(err);
+        });
+
+        child.on('close', (code) => {
+          resolve({ code });
+        });
+      }).catch((err) => {
+        if (err && err.code === 'ENOENT') {
+          throw new SkipTestError(`Python interpreter not found: ${pythonBin}`);
+        }
+        throw err;
+      });
+
+      if (runResult.code === 0) {
+        if (stdout.trim().length > 0) {
+          process.stdout.write(stdout);
+        }
+        if (stderr.trim().length > 0) {
+          process.stderr.write(stderr);
+        }
+        return;
+      }
+
+      if (runResult.code === 75) {
+        throw new SkipTestError(stderr.trim() || 'Python reference generation skipped');
+      }
+
+      const details = [
+        `exit code ${runResult.code}`,
+        stderr.trim() ? `stderr: ${stderr.trim()}` : null,
+        stdout.trim() ? `stdout: ${stdout.trim()}` : null,
+      ]
+        .filter(Boolean)
+        .join('\n');
+
+      throw new Error(`Python reference generation failed\n${details}`);
+    })();
+  }
+
+  return pythonReferencePromise;
+}
+
 async function collectAudioPairs() {
+  await ensurePythonTranscripts();
   const files = await fs.readdir(audioDir);
   const wavFiles = files.filter((f) => f.endsWith('.wav')).sort();
   const pairs = [];
@@ -197,6 +333,17 @@ async function collectAudioPairs() {
 }
 
 test('parakeet wasm transcription matches reference texts', { timeout: 600_000 }, async (t) => {
+  let pairs;
+  try {
+    pairs = await collectAudioPairs();
+  } catch (err) {
+    if (err instanceof SkipTestError) {
+      t.skip(err.message);
+      return;
+    }
+    throw err;
+  }
+
   let model;
   try {
     model = await getModel();
@@ -207,8 +354,6 @@ test('parakeet wasm transcription matches reference texts', { timeout: 600_000 }
     }
     throw err;
   }
-
-  const pairs = await collectAudioPairs();
 
   for (const pair of pairs) {
     await t.test(`transcribes ${pair.name}`, async () => {
