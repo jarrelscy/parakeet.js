@@ -17,90 +17,50 @@ export function getSelectedBackend() {
 }
 
 export async function initOrt({ backend = 'webgpu', wasmPaths, numThreads } = {}) {
-  // Dynamic import to handle Vite bundling issues
-  let ort;
-  
+  let ortModule;
   try {
-    const ortModule = await import('onnxruntime-web');
-    ort = ortModule.default || ortModule;
-    
-    // Debug: Check the structure of ort
-    console.log('[Parakeet.js] ORT structure:', { 
-      hasDefault: !!ortModule.default, 
-      hasEnv: !!ort.env, 
-      hasWasm: !!ort.env?.wasm,
-      hasWebgpu: !!ort.env?.webgpu,
-      keys: Object.keys(ort).slice(0, 10) // Show first 10 keys
-    });
-    
-    // If still no env, try accessing it differently
-    if (!ort.env) {
-      console.log('[Parakeet.js] Trying alternative access patterns...');
-      console.log('[Parakeet.js] ortModule keys:', Object.keys(ortModule));
-      
-      // Sometimes the module structure is nested
-      if (ortModule.ort) {
-        ort = ortModule.ort;
-        console.log('[Parakeet.js] Found ort in ortModule.ort');
-      }
-    }
-  } catch (e) {
-    console.error('[Parakeet.js] Failed to import onnxruntime-web:', e);
+    ortModule = await import('onnxruntime-web');
+  } catch (error) {
     throw new Error('Failed to load ONNX Runtime Web. Please check your network connection.');
   }
-  
+
+  let ort = ortModule.default || ortModule;
+  if (!ort.env && ortModule.ort) {
+    ort = ortModule.ort;
+  }
+
   if (!ort || !ort.env) {
     throw new Error('ONNX Runtime Web loaded but env is not available. This might be a bundling issue.');
   }
-  
-  // Set up WASM paths if explicitly provided. The bundled ONNX Runtime already
-  // includes the WASM assets so we only override when a custom path is
-  // supplied (for example when self-hosting the binaries).
+
   if (wasmPaths) {
     ort.env.wasm.wasmPaths = wasmPaths;
   }
 
-  // Configure WASM for better performance
+  const hasNavigator = typeof navigator !== 'undefined';
+  const nav = hasNavigator ? navigator : undefined;
+  const threadCount = typeof numThreads === 'number' && numThreads > 0
+    ? numThreads
+    : nav?.hardwareConcurrency || 4;
+
   if (backend === 'wasm' || backend === 'webgpu') {
-    // Enable multi-threading if supported
     if (typeof SharedArrayBuffer !== 'undefined') {
-      ort.env.wasm.numThreads = numThreads || navigator.hardwareConcurrency || 4;
+      ort.env.wasm.numThreads = threadCount;
       ort.env.wasm.simd = true;
-      console.log(`[Parakeet.js] WASM configured with ${ort.env.wasm.numThreads} threads, SIMD enabled`);
     } else {
-      console.warn('[Parakeet.js] SharedArrayBuffer not available - using single-threaded WASM');
-      ort.env.wasm.numThreads = 1;
+      ort.env.wasm.numThreads = Math.max(1, threadCount | 0);
     }
-    
-    // Enable other WASM optimizations
-    ort.env.wasm.proxy = false; // Direct execution for better performance
+
+    ort.env.wasm.proxy = false;
   }
 
   if (backend === 'webgpu') {
-    // Check WebGPU support properly
-    const webgpuSupported = 'gpu' in navigator;
-    console.log(`[Parakeet.js] WebGPU supported: ${webgpuSupported}`);
-    
-    if (webgpuSupported) {
-      try {
-        // In newer versions of ONNX Runtime Web, WebGPU initialization is automatic
-        // No need to call ort.env.webgpu.init() manually
-        console.log('[Parakeet.js] WebGPU will be initialized automatically when creating session');
-      } catch (error) {
-        console.warn('[Parakeet.js] WebGPU initialization failed:', error);
-        console.warn('[Parakeet.js] Falling back to WASM');
-        backend = 'wasm';
-      }
-    } else {
-      console.warn('[Parakeet.js] WebGPU not supported – falling back to WASM');
+    const webgpuSupported = hasNavigator && 'gpu' in navigator;
+    if (!webgpuSupported) {
       backend = 'wasm';
     }
   }
 
-  // Store the final backend choice for use in model selection without mutating the
-  // ONNX Runtime namespace (which can be frozen in some environments).
   selectedBackend = backend;
-
-  // Return the ort module for use in creating sessions and tensors
   return ort;
 }
