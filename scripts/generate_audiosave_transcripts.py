@@ -78,10 +78,10 @@ def _stage_model_directory(model_dir: str | None) -> tuple[tempfile.TemporaryDir
 
     copy_if_exists("encoder-model.onnx.data")
 
-    # Prefer the int8 decoder to mirror the JS configuration.
-    decoder_copied = copy_if_exists("decoder_joint-model.int8.onnx", rename="decoder_joint-model.onnx")
+    # Always prefer the fp32 decoder to match our test configuration.
+    decoder_copied = copy_if_exists("decoder_joint-model.onnx")
     if decoder_copied is None:
-        decoder_copied = copy_if_exists("decoder_joint-model.onnx")
+        decoder_copied = copy_if_exists("decoder_joint-model.int8.onnx", rename="decoder_joint-model.onnx")
     if decoder_copied is None:
         raise SystemExit(f"Missing decoder weights in {source}")
 
