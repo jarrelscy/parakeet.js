@@ -10,7 +10,7 @@ import { OnnxPreprocessor } from './preprocessor.js';
  * NOTE: This is an *early* scaffold – the `transcribe` method is TODO.
  */
 export class ParakeetModel {
-  constructor({ tokenizer, encoderSession, joinerSession, preprocessor, ort, subsampling = 8, windowStride = 0.01, normalizer = (s)=>s }) {
+  constructor({ tokenizer, encoderSession, joinerSession, preprocessor, ort, subsampling = 8, windowStride = 0.01, normalizer }) {
     this.tokenizer = tokenizer;
     this.encoderSession = encoderSession;
     this.joinerSession = joinerSession;
@@ -25,15 +25,13 @@ export class ParakeetModel {
     this.predLayers = 2;
     this.maxTokensPerStep = 10;
 
-    // Allocate zero LSTM states for the combined decoder; will be reused.
+    // Decoder state bookkeeping for the combined model.
     const numLayers = this.predLayers;
     const hidden = this.predHidden;
-    const size = numLayers * 1 * hidden;
-    const z = new Float32Array(size); // zeros
-    this._combState1 = new ort.Tensor('float32', z, [numLayers, 1, hidden]);
-    this._combState2 = new ort.Tensor('float32', z.slice(), [numLayers, 1, hidden]);
+    this._decoderStateShape = [numLayers, 1, hidden];
+    this._decoderStateSize = numLayers * hidden;
 
-    this._normalizer = normalizer;
+    this._normalizer = typeof normalizer === 'function' ? normalizer : (s) => s;
     this.subsampling = subsampling;
     this.windowStride = windowStride;
   }
@@ -187,14 +185,20 @@ export class ParakeetModel {
     return new ParakeetModel({ tokenizer, encoderSession, joinerSession, preprocessor, ort, subsampling, windowStride });
   }
 
-  async _runCombinedStep(encTensor, token, currentState = null) {
+  _createZeroDecoderState() {
+    const state1 = new this.ort.Tensor('float32', new Float32Array(this._decoderStateSize), this._decoderStateShape);
+    const state2 = new this.ort.Tensor('float32', new Float32Array(this._decoderStateSize), this._decoderStateShape);
+    return { state1, state2 };
+  }
+
+  async _runCombinedStep(encTensor, token, currentState) {
     const singleToken = typeof token === 'number' ? token : this.blankId;
 
     const targetTensor = new this.ort.Tensor('int32', new Int32Array([singleToken]), [1, 1]);
     const lenTensor = new this.ort.Tensor('int32', new Int32Array([1]), [1]);
 
-    const state1 = currentState?.state1 || this._combState1;
-    const state2 = currentState?.state2 || this._combState2;
+    const state1 = currentState.state1;
+    const state2 = currentState.state2;
 
     const feeds = {
       encoder_outputs: encTensor,
@@ -242,7 +246,7 @@ export class ParakeetModel {
     const {
       returnTimestamps = false,
       returnConfidences = false,
-      temperature = 1.2,
+      temperature = 1.0,
       debug = false,
       skipCMVN = false,
       frameStride = 1,
@@ -330,7 +334,7 @@ export class ParakeetModel {
     const frameConfs = [];
     let overallLogProb = 0;
 
-    let decoderState = null;
+    let decoderState = this._createZeroDecoderState();
     let emittedTokens = 0;
 
     const decStartTime = perfEnabled ? performance.now() : 0;
@@ -341,7 +345,6 @@ export class ParakeetModel {
 
       const prevTok = ids.length ? ids[ids.length - 1] : this.blankId;
       const { tokenLogits, step, newState } = await this._runCombinedStep(encTensor, prevTok, decoderState);
-      decoderState = newState;
 
       // Temperature scaling & argmax
       if (blankPenalty !== 0 && this.blankId < tokenLogits.length) {
@@ -366,7 +369,8 @@ export class ParakeetModel {
       frameConfs.push(confVal);
       overallLogProb += Math.log(confVal);
 
-      if (maxId !== this.blankId) {
+      const emittedNonBlank = maxId !== this.blankId;
+      if (emittedNonBlank) {
         ids.push(maxId);
         if (returnTimestamps) {
           const TIME_STRIDE = this.subsampling * this.windowStride;
@@ -377,12 +381,16 @@ export class ParakeetModel {
         }
         if (returnConfidences) tokenConfs.push(confVal);
         emittedTokens += 1;
+        decoderState = newState;
       }
 
-      const shouldAdvance = maxId === this.blankId || emittedTokens >= this.maxTokensPerStep;
-      t += step > 0 ? step : (shouldAdvance ? frameStride : 0);
-      if (!shouldAdvance && step === 0) t += 1; // safeguard
-      if (maxId === this.blankId) emittedTokens = 0;
+      if (step > 0) {
+        t += step;
+        emittedTokens = 0;
+      } else if (maxId === this.blankId || emittedTokens >= this.maxTokensPerStep) {
+        t += frameStride;
+        emittedTokens = 0;
+      }
     }
 
     if (perfEnabled) {
