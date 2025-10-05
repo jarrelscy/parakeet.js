@@ -10,13 +10,48 @@ let dbPromise = null;
 // Cache for repo file listings so we only hit the HF API once per page load
 const repoFileCache = new Map();
 
+function getAccessToken() {
+  const globalToken = typeof globalThis !== 'undefined' ? globalThis.HF_ACCESS_TOKEN : undefined;
+  const envToken = typeof process !== 'undefined' && process?.env ? process.env.HF_ACCESS_TOKEN : undefined;
+  return envToken || globalToken || '';
+}
+
+function fetchWithAuth(url, options = {}) {
+  const token = getAccessToken();
+  const target = url instanceof URL ? url.toString() : url;
+  const isHttp = typeof target === 'string' ? /^https?:/i.test(target) : false;
+  if (!token || !isHttp) {
+    return fetch(url, options);
+  }
+
+  const nextOptions = { ...options };
+
+  if (typeof Headers !== 'undefined') {
+    const headers = new Headers(options.headers || undefined);
+    if (!headers.has('Authorization')) {
+      headers.set('Authorization', `Bearer ${token}`);
+    }
+    nextOptions.headers = headers;
+  } else {
+    const headersInit = Array.isArray(options.headers)
+      ? Object.fromEntries(options.headers)
+      : { ...(options.headers || {}) };
+    if (!('Authorization' in headersInit)) {
+      headersInit.Authorization = `Bearer ${token}`;
+    }
+    nextOptions.headers = headersInit;
+  }
+
+  return fetch(url, nextOptions);
+}
+
 async function listRepoFiles(repoId, revision = 'main') {
   const cacheKey = `${repoId}@${revision}`;
   if (repoFileCache.has(cacheKey)) return repoFileCache.get(cacheKey);
 
   const url = `https://huggingface.co/api/models/${repoId}?revision=${revision}`;
   try {
-    const resp = await fetch(url);
+    const resp = await fetchWithAuth(url);
     if (!resp.ok) throw new Error(`Failed to list repo files: ${resp.status}`);
     const json = await resp.json();
     const files = json.siblings?.map(s => s.rfilename) || [];
@@ -106,7 +141,7 @@ export async function getModelFile(repoId, filename, options = {}) {
   
   // Download from HF
   console.log(`[Hub] Downloading ${filename} from ${repoId}...`);
-  const response = await fetch(url);
+  const response = await fetchWithAuth(url);
   if (!response.ok) {
     throw new Error(`Failed to download ${filename}: ${response.status} ${response.statusText}`);
   }
@@ -156,7 +191,7 @@ export async function getModelFile(repoId, filename, options = {}) {
  */
 export async function getModelText(repoId, filename, options = {}) {
   const blobUrl = await getModelFile(repoId, filename, options);
-  const response = await fetch(blobUrl);
+  const response = await fetchWithAuth(blobUrl);
   const text = await response.text();
   URL.revokeObjectURL(blobUrl); // Clean up blob URL
   return text;
