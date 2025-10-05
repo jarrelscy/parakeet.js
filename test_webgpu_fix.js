@@ -1,5 +1,5 @@
 // Test WebGPU initialization fix
-import { initOrt } from './src/backend.js';
+import { getSelectedBackend, initOrt } from './src/backend.js';
 
 async function testWebGPU() {
   console.log('Testing WebGPU initialization...');
@@ -8,7 +8,7 @@ async function testWebGPU() {
     // Test WebGPU backend
     const ort = await initOrt({ backend: 'webgpu' });
     console.log('✅ WebGPU backend initialized successfully');
-    console.log('Backend selected:', ort._selectedBackend);
+    console.log('Backend selected:', getSelectedBackend());
     
     // Test creating a simple session to verify WebGPU works
     console.log('Testing WebGPU session creation...');

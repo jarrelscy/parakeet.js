@@ -1,5 +1,7 @@
 node_modules
 dist
+.venv
+hf-cache/
 .env
 .env.local
 .env.development.local
@@ -7,4 +9,3 @@ dist
 .env.production.local
 *.pem
 docs/
-scripts/

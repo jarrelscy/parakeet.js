@@ -28,10 +28,11 @@
   "scripts": {
     "build": "tsup",
     "clean": "rimraf dist",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test": "node --test"
   },
   "dependencies": {
-    "onnxruntime-web": "1.22.0-dev.20250409-89f8206ba4"
+    "onnxruntime-web": "^1.23.0"
   },
   "author": "Yunus Seyhan Dede",
   "license": "MIT",
@@ -46,6 +47,7 @@
   "devDependencies": {
     "rimraf": "^6.0.1",
     "tsup": "^8.5.0",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "undici": "^7.16.0"
   }
 }
