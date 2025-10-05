@@ -223,7 +223,10 @@ test('parakeet wasm transcription matches reference texts', { timeout: 600_000 }
     await t.test(`transcribes ${pair.name}`, async () => {
       const audio = await loadWavFloat32(pair.wavPath);
       const result = await model.transcribe(audio, 16000, { returnTimestamps: false, returnConfidences: false });
-      assert.equal(result.utterance_text.trim(), pair.expected);
+      const actual = result.utterance_text.trim();
+      console.log(`[${pair.name}] transcript: ${actual}`);
+      console.log(`[${pair.name}] reference: ${pair.expected}`);
+      assert.equal(actual, pair.expected);
     });
   }
 });

@@ -108,6 +108,7 @@ def regenerate_transcripts(audio_dir: Path, model_dir: str | None) -> None:
             text = model.recognize(samples, sample_rate=16000)
             out_path = wav_path.with_suffix(".txt")
             out_path.write_text(text, encoding="utf-8")
+            print(f"{wav_path.name}:\n{text}\n")
     finally:
         temp_dir.cleanup()
 
