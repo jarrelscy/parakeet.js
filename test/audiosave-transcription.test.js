@@ -117,7 +117,7 @@ async function getModel() {
 
     const hubConfig = await getParakeetModel('jarrelscy/parakeet-tdt-0.6b-v2-onnx', {
       backend: 'wasm',
-      encoderQuant: 'int8',
+      encoderQuant: 'fp32',
       decoderQuant: 'int8',
     });
 
@@ -127,7 +127,7 @@ async function getModel() {
       backend: 'wasm',
       wasmPaths: wasmUrl,
       decoderQuant: 'int8',
-      encoderQuant: 'int8',
+      encoderQuant: 'fp32',
     });
   }
   return modelPromise;
