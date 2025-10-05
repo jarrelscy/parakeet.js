@@ -158,7 +158,7 @@ async function getModel() {
       modelConfig = await getParakeetModel('jarrelscy/parakeet-tdt-0.6b-v2-onnx', {
         backend: 'wasm',
         encoderQuant: 'fp32',
-        decoderQuant: 'int8',
+        decoderQuant: 'fp32',
       });
     }
 
@@ -167,7 +167,7 @@ async function getModel() {
       filenames: modelConfig.filenames,
       backend: 'wasm',
       wasmPaths: wasmUrl,
-      decoderQuant: 'int8',
+      decoderQuant: 'fp32',
       encoderQuant: 'fp32',
     });
   }
