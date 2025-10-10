@@ -261,33 +261,49 @@ export class ParakeetModel {
     const blankPenalty = (typeof optBlankPenalty === 'number' ? optBlankPenalty : undefined) ??
       (typeof opts.blank_penalty === 'number' ? opts.blank_penalty : 0);
 
-    const lookupNgramBias = (biasTree, history, candidateId) => {
-      if (!biasTree) return null;
-      const histLength = history.length;
+    const toFiniteNumber = (value) => {
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+      if (typeof value === 'string' && value.trim() !== '') {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed)) return parsed;
+      }
+      return null;
+    };
 
-      for (let n = histLength; n >= 0; n--) {
+    const prepareNgramContext = (biasTree, history) => {
+      if (!biasTree || typeof biasTree !== 'object') return null;
+
+      const histLength = history.length;
+      const contexts = new Array(histLength + 1);
+      const defaults = new Array(histLength + 1);
+
+      for (let start = 0; start <= histLength; start++) {
         let node = biasTree;
         let valid = true;
 
-        if (n > 0) {
-          const start = histLength - n;
-          for (let i = start; i < histLength; i++) {
-            node = node?.[history[i]];
-            if (!node || typeof node !== 'object') {
-              valid = false;
-              break;
-            }
+        for (let i = start; i < histLength; i++) {
+          const next = node?.[history[i]];
+          if (!next || typeof next !== 'object') {
+            valid = false;
+            break;
           }
-          if (!valid) continue;
+          node = next;
         }
 
-        const candidateNode = node?.[candidateId];
-        if (candidateNode && typeof candidateNode === 'object' && typeof candidateNode.log_prob === 'number') {
-          return candidateNode.log_prob;
+        if (valid && node && typeof node === 'object') {
+          contexts[start] = node;
+          defaults[start] = toFiniteNumber(node.def_prob);
+        } else {
+          contexts[start] = null;
+          defaults[start] = null;
         }
       }
 
-      return null;
+      return {
+        contexts,
+        defaults,
+        historyLength: histLength,
+      };
     };
 
     const perfEnabled = true; // always collect and log timings
@@ -351,10 +367,84 @@ export class ParakeetModel {
         tokenLogits[this.blankId] -= blankPenalty;
       }
       let maxVal = -Infinity, maxId = 0;
+      const ngramContext = ngramBias ? prepareNgramContext(ngramBias, ids) : null;
+
       for (let i = 0; i < tokenLogits.length; i++) {
-        if (ngramBias && i !== this.blankId) {
-          const biasLogProb = lookupNgramBias(ngramBias, ids, i);
-          if (typeof biasLogProb === 'number') {
+        if (ngramContext && i !== this.blankId) {
+          const { contexts, defaults, historyLength } = ngramContext;
+          let biasLogProb = null;
+          let resolved = false;
+
+          if (historyLength > 0) {
+            for (let idx = 0; idx < historyLength; idx++) {
+              const node = contexts[idx];
+              if (!node) continue;
+
+              const candidateNode = node?.[i];
+              if (candidateNode && typeof candidateNode === 'object') {
+                const logProb = toFiniteNumber(candidateNode.log_prob);
+                if (logProb !== null) {
+                  biasLogProb = logProb;
+                  resolved = true;
+                  break;
+                }
+              }
+
+              const nodeDefault = defaults[idx];
+              if (nodeDefault !== null) {
+                biasLogProb = nodeDefault;
+                resolved = true;
+                break;
+              }
+            }
+
+            if (!resolved) {
+              const rootNode = contexts[historyLength];
+              if (rootNode) {
+                const rootCandidate = rootNode?.[i];
+                if (rootCandidate && typeof rootCandidate === 'object') {
+                  const logProb = toFiniteNumber(rootCandidate.log_prob);
+                  if (logProb !== null) {
+                    biasLogProb = logProb;
+                    resolved = true;
+                  }
+                }
+              }
+            }
+
+            if (!resolved) {
+              if (blankPenalty !== 0) {
+                tokenLogits[i] -= blankPenalty;
+              }
+              continue;
+            }
+          } else {
+            const rootNode = contexts[0];
+            if (rootNode) {
+              const rootCandidate = rootNode?.[i];
+              if (rootCandidate && typeof rootCandidate === 'object') {
+                const logProb = toFiniteNumber(rootCandidate.log_prob);
+                if (logProb !== null) {
+                  biasLogProb = logProb;
+                  resolved = true;
+                }
+              }
+
+              if (!resolved) {
+                const rootDefault = defaults[0];
+                if (rootDefault !== null) {
+                  biasLogProb = rootDefault;
+                  resolved = true;
+                }
+              }
+            }
+
+            if (!resolved) {
+              continue;
+            }
+          }
+
+          if (biasLogProb !== null) {
             tokenLogits[i] += ngramAlpha * biasLogProb;
           }
         }
