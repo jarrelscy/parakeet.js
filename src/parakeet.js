@@ -34,6 +34,10 @@ export class ParakeetModel {
     this._normalizer = typeof normalizer === 'function' ? normalizer : (s) => s;
     this.subsampling = subsampling;
     this.windowStride = windowStride;
+
+    // Serialise transcribe() invocations to avoid ORT session clashes when
+    // callers trigger concurrent recognitions on the same instance.
+    this._transcribeQueue = Promise.resolve();
   }
 
   /**
@@ -239,10 +243,7 @@ export class ParakeetModel {
     return { features, T, melBins };
   }
 
-  /**
-   * Transcribe 16-kHz mono PCM. Returns full rich output (timestamps/confidences opt-in).
-   */
-  async transcribe(audio, sampleRate = 16000, opts = {}) {
+  async _transcribeOnce(audio, sampleRate = 16000, opts = {}) {
     const {
       returnTimestamps = false,
       returnConfidences = false,
@@ -498,6 +499,16 @@ export class ParakeetModel {
       } : null,
       is_final: true,
     };
+  }
+
+  /**
+   * Transcribe 16-kHz mono PCM. Returns full rich output (timestamps/confidences opt-in).
+   * Calls are serialised to ensure internal ONNX sessions are not used concurrently.
+   */
+  async transcribe(audio, sampleRate = 16000, opts = {}) {
+    const queued = this._transcribeQueue.then(() => this._transcribeOnce(audio, sampleRate, opts));
+    this._transcribeQueue = queued.then(() => undefined, () => undefined);
+    return queued;
   }
 
   /**
