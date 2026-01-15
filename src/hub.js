@@ -325,6 +325,42 @@ export async function getParakeetModel(repoId, options = {}) {
 
   const repoFiles = await listRepoFiles(repoId, options.revision || 'main');
 
+  if (repoFiles.includes('model.onnx')) {
+    const filesToGet = [
+      { key: 'modelUrl', name: 'model.onnx' },
+      { key: 'tokenizerUrl', name: repoFiles.includes('tokenizer.json') ? 'tokenizer.json' : 'vocab.txt' },
+      { key: 'preprocessorConfigUrl', name: 'preprocessor_config.json' },
+    ];
+
+    if (repoFiles.includes('model.onnx.data')) {
+      filesToGet.push({ key: 'modelDataUrl', name: 'model.onnx.data' });
+    }
+
+    const results = {
+      urls: {},
+      filenames: {
+        model: 'model.onnx',
+      },
+      modelType: 'ctc',
+    };
+
+    for (const { key, name } of filesToGet) {
+      try {
+        const wrappedProgress = progress ? (p) => progress({ ...p, file: name }) : undefined;
+        results.urls[key] = await getModelFile(repoId, name, { ...options, progress: wrappedProgress });
+      } catch (e) {
+        if (key.endsWith('DataUrl')) {
+          console.warn(`[Hub] Optional external data file not found: ${name}. This is expected if the model is small.`);
+          results.urls[key] = null;
+        } else {
+          throw e;
+        }
+      }
+    }
+
+    return results;
+  }
+
   const filesToGet = [
     { key: 'encoderUrl', name: encoderName },
     { key: 'decoderUrl', name: decoderName },
