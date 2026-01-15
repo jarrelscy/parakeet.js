@@ -70,7 +70,9 @@ export class OnnxPreprocessor {
 
     return {
       features: featuresTensor.data,
-      length: Number(features_lens.data[0])
+      length: Number(features_lens.data[0]),
+      featureDim: featuresTensor.dims?.[1],
+      layout: 'BCT',
     };
   }
-} 
+}

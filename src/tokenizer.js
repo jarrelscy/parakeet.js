@@ -21,14 +21,38 @@ export class ParakeetTokenizer {
 
   static async fromUrl(tokensUrl) {
     const text = await fetchText(tokensUrl);
-    const lines = text.split(/\r?\n/).filter(Boolean);
-    const id2token = [];
-    for (const line of lines) {
-      const [tok, idStr] = line.split(/\s+/);
-      const id = parseInt(idStr, 10);
-      id2token[id] = tok;
+    const trimmed = text.trim();
+    let id2token = [];
+
+    if (trimmed.startsWith('{')) {
+      const json = JSON.parse(trimmed);
+      const vocab = json?.model?.vocab;
+      if (Array.isArray(vocab)) {
+        id2token = vocab.map((entry) => entry[0]);
+      } else if (vocab && typeof vocab === 'object') {
+        for (const [token, id] of Object.entries(vocab)) {
+          id2token[id] = token;
+        }
+      }
     }
-    return new ParakeetTokenizer(id2token);
+
+    if (!id2token.length) {
+      const lines = text.split(/\r?\n/).filter(Boolean);
+      for (const line of lines) {
+        const [tok, idStr] = line.split(/\s+/);
+        const id = parseInt(idStr, 10);
+        id2token[id] = tok;
+      }
+    }
+    const tokenizer = new ParakeetTokenizer(id2token);
+    const blankCandidates = ['<epsilon>', '<blank>', '<blk>'];
+    for (const cand of blankCandidates) {
+      if (id2token.includes(cand)) {
+        tokenizer.blankToken = cand;
+        break;
+      }
+    }
+    return tokenizer;
   }
 
   /**
@@ -37,11 +61,13 @@ export class ParakeetTokenizer {
    * @param {number[]} ids
    * @returns {string}
    */
-  decode(ids) {
+  decode(ids, options = {}) {
+    const skipTokens = new Set(options.skipTokens || []);
+    skipTokens.add(this.blankToken);
     const pieces = [];
     for (const id of ids) {
       const token = this.id2token[id];
-      if (token === undefined || token === this.blankToken) continue;
+      if (token === undefined || skipTokens.has(token)) continue;
       pieces.push(token.replace(/\u2581/g, ' '));
     }
 
