@@ -1,1 +1,1 @@
-[CLINICAL]{colon}{newline}{newline}[TECHNIQUE]{colon} Nonintravenous contrastenhanced CT of the brain{stop}{newline}
+[CLINICAL] {colon} {newline} {newline} [TECHNIQUE] {colon} Nonintravenous contrast enhanced CT of the brain {stop} {newline}

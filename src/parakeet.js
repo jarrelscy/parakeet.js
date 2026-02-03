@@ -11,7 +11,7 @@ import { LogMelPreprocessor } from './log_mel_preprocessor.js';
  * NOTE: This is an *early* scaffold – the `transcribe` method is TODO.
  */
 export class ParakeetModel {
-  constructor({ tokenizer, encoderSession, joinerSession, ctcSession, preprocessor, ort, subsampling = 8, windowStride = 0.01, normalizer, modelType = 'combined', blankId = null }) {
+  constructor({ tokenizer, encoderSession, joinerSession, ctcSession, preprocessor, ort, subsampling = 8, windowStride = 0.01, normalizer, modelType = 'combined', blankId = null, medasr = false }) {
     this.tokenizer = tokenizer;
     this.encoderSession = encoderSession;
     this.joinerSession = joinerSession;
@@ -19,6 +19,7 @@ export class ParakeetModel {
     this.preprocessor = preprocessor;
     this.ort = ort;
     this.modelType = modelType;
+    this.medasr = medasr;
 
     // Default IDs – may later be read from model metadata.
     this.blankId = typeof blankId === 'number' ? blankId : 1024;
@@ -70,6 +71,7 @@ export class ParakeetModel {
       cpuThreads = undefined,
       modelType: requestedModelType,
       blankId,
+      medasr = false,
     } = cfg;
 
     const hasCtcModel = !!modelUrl;
@@ -185,7 +187,7 @@ export class ParakeetModel {
     const tokenizerPromise = ParakeetTokenizer.fromUrl(tokenizerUrl);
     const preprocPromise = preprocessorUrl
       ? Promise.resolve(new OnnxPreprocessor(preprocessorUrl, { backend, wasmPaths, enableProfiling, enableGraphCapture: isFullWasm ? false : graphCaptureEnabled, numThreads: cpuThreads }))
-      : LogMelPreprocessor.fromConfigUrl(preprocessorConfigUrl);
+      : LogMelPreprocessor.fromConfigUrl(preprocessorConfigUrl, { medasr });
 
     let encoderSession, joinerSession, ctcSession;
     if (hasCtcModel) {
@@ -218,6 +220,7 @@ export class ParakeetModel {
       windowStride,
       modelType,
       blankId: resolvedBlankId,
+      medasr,
     });
   }
 
@@ -371,7 +374,8 @@ export class ParakeetModel {
 
     let tokenStart;
     if (perfEnabled) tokenStart = performance.now();
-    const text = this._normalizer(this.tokenizer.decode(ids, { skipTokens: ['<s>', '</s>', '<unk>'] }));
+    // For medasr models, use raw decode to match HuggingFace tokenizer.decode output
+    const text = this._normalizer(this.tokenizer.decode(ids, { skipTokens: ['<s>', '</s>', '<unk>'], raw: this.medasr }));
     if (perfEnabled) tToken = performance.now() - tokenStart;
 
     const total = perfEnabled ? performance.now() - t0 : null;

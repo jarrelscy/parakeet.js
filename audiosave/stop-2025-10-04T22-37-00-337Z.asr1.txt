@@ -1,1 +1,1 @@
-[CLINellICAL]{colon}{new line}{newline}[TECHNIQUE]{colon}{newline}
+[CLINICAL] {colon} {newline} {newline} [TECHNIQUE] {colon} {newline}

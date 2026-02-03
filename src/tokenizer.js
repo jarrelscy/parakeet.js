@@ -59,6 +59,9 @@ export class ParakeetTokenizer {
    * Decode an array of token IDs into a human readable string.
    * Implements the SentencePiece rule where leading `▁` marks a space.
    * @param {number[]} ids
+   * @param {Object} [options]
+   * @param {string[]} [options.skipTokens] - Tokens to skip during decoding
+   * @param {boolean} [options.raw] - If true, skip spacing cleanup (for asr1/medasr models)
    * @returns {string}
    */
   decode(ids, options = {}) {
@@ -73,6 +76,11 @@ export class ParakeetTokenizer {
 
     const raw = pieces.join('');
     if (!raw) return '';
+
+    // For asr1/medasr models, return raw output to match HuggingFace tokenizer.decode
+    if (options.raw) {
+      return raw;
+    }
 
     // Mirror the spacing cleanup implemented in onnx_asr so our outputs
     // match the Python reference decoder byte-for-byte.

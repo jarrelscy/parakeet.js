@@ -125,6 +125,8 @@ async function getModel() {
       modelType: modelConfig.modelType,
       backend: 'wasm',
       wasmPaths: wasmUrl,
+      // Use LasrFeatureExtractor-compatible preprocessing (Kaldi mel scale, 125-7500 Hz)
+      medasr: true,
     });
   }
   return modelPromise;

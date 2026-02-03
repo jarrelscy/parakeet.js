@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Regenerate audiosave transcripts with the jarrelscy/asr1 ONNX model."""
+"""Regenerate audiosave transcripts with the jarrelscy/asr1 model.
+
+Uses ONNX Runtime directly with LasrFeatureExtractor preprocessing to match
+what the JavaScript implementation does.
+"""
 
 from __future__ import annotations
 
@@ -8,138 +12,150 @@ import json
 import sys
 import tempfile
 import urllib.request
-import wave
 from pathlib import Path
 
+import librosa
 import numpy as np
-import re
 
 try:
     import onnxruntime as ort
-except ModuleNotFoundError as exc:  # pragma: no cover - handled in CI setup
+except ModuleNotFoundError as exc:
     missing = exc.name or "onnxruntime"
     raise SystemExit(f"{missing} must be installed to refresh transcripts") from exc
 
 
-LOG_FLOOR = 1e-10
+# LasrFeatureExtractor parameters (matching HuggingFace)
+LOG_FLOOR = 1e-5
+LOWER_EDGE_HERTZ = 125.0
+UPPER_EDGE_HERTZ = 7500.0
 
 
-def load_audio(path: Path) -> np.ndarray:
-    with wave.open(str(path), "rb") as wav:
-        if wav.getnchannels() != 1:
-            raise RuntimeError(f"{path} must be mono")
-        if wav.getframerate() != 16000:
-            raise RuntimeError(f"{path} must be 16000Hz")
-        if wav.getsampwidth() != 2:
-            raise RuntimeError(f"{path} must be 16-bit PCM")
-        frames = wav.readframes(wav.getnframes())
-    samples = np.frombuffer(frames, dtype="<i2").astype("float32") / 32768.0
-    return samples
+def hz_to_mel_kaldi(hz: float) -> float:
+    """Kaldi mel scale conversion."""
+    return 1127.0 * np.log(1.0 + hz / 700.0)
 
 
-def hz_to_mel(hz: float) -> float:
-    return 2595 * np.log10(1 + hz / 700)
+def create_mel_filterbank_hf(n_mels: int, n_fft: int, sample_rate: int,
+                              lower_edge_hz: float = 125.0, upper_edge_hz: float = 7500.0) -> np.ndarray:
+    """Create mel filterbank matching HuggingFace's linear_to_mel_weight_matrix."""
+    num_spectrogram_bins = n_fft // 2 + 1
+    bands_to_zero = 1  # Excludes DC bin
+    nyquist = sample_rate / 2.0
 
+    # Linear frequencies (excluding DC)
+    linear_freqs = np.array([(i / (num_spectrogram_bins - 1)) * nyquist
+                             for i in range(bands_to_zero, num_spectrogram_bins)])
 
-def mel_to_hz(mel: float) -> float:
-    return 700 * (10 ** (mel / 2595) - 1)
+    # Convert linear frequencies to mel (Kaldi scale)
+    spectrogram_bins_mel = hz_to_mel_kaldi(linear_freqs)
 
+    # Mel band edges
+    lower_mel = hz_to_mel_kaldi(lower_edge_hz)
+    upper_mel = hz_to_mel_kaldi(upper_edge_hz)
+    edges = np.linspace(lower_mel, upper_mel, n_mels + 2)
 
-def create_mel_filterbank(n_mels: int, n_fft: int, sample_rate: int) -> np.ndarray:
-    fft_bins = n_fft // 2 + 1
-    mel_min = hz_to_mel(0)
-    mel_max = hz_to_mel(sample_rate / 2)
-    mel_points = np.linspace(mel_min, mel_max, n_mels + 2)
-    hz_points = mel_to_hz(mel_points)
-    bin_points = np.floor((n_fft + 1) * hz_points / sample_rate).astype(int)
+    # Create filterbank with shape [num_spectrogram_bins, n_mels]
+    filters = np.zeros((num_spectrogram_bins, n_mels), dtype=np.float64)
 
-    filters = np.zeros((n_mels, fft_bins), dtype=np.float32)
     for m in range(n_mels):
-        left, center, right = bin_points[m], bin_points[m + 1], bin_points[m + 2]
-        if center == left:
-            center += 1
-        if right == center:
-            right += 1
-        for k in range(left, center):
-            if 0 <= k < fft_bins:
-                filters[m, k] = (k - left) / max(center - left, 1)
-        for k in range(center, right):
-            if 0 <= k < fft_bins:
-                filters[m, k] = (right - k) / max(right - center, 1)
+        lower_edge_mel = edges[m]
+        center_mel = edges[m + 1]
+        upper_edge_mel = edges[m + 2]
+
+        for i, bin_mel in enumerate(spectrogram_bins_mel):
+            lower_slope = (bin_mel - lower_edge_mel) / (center_mel - lower_edge_mel)
+            upper_slope = (upper_edge_mel - bin_mel) / (upper_edge_mel - center_mel)
+            weight = max(0.0, min(lower_slope, upper_slope))
+            # Account for bands_to_zero offset
+            filters[i + bands_to_zero, m] = weight
+
     return filters
 
 
-def log_mel_spectrogram(audio: np.ndarray, sample_rate: int, n_fft: int, win_length: int, hop_length: int, n_mels: int) -> np.ndarray:
-    if audio.shape[0] <= win_length:
-        frames = 1
-    else:
-        frames = (audio.shape[0] - win_length) // hop_length + 1
-        remainder = (audio.shape[0] - win_length) % hop_length
-        if remainder:
-            frames += 1
-    needed = (frames - 1) * hop_length + win_length
-    if audio.shape[0] < needed:
-        pad_width = needed - audio.shape[0]
-        audio = np.pad(audio, (0, pad_width))
+def extract_features(audio: np.ndarray, sample_rate: int = 16000, n_fft: int = 512,
+                     win_length: int = 400, hop_length: int = 160, n_mels: int = 128) -> np.ndarray:
+    """Extract log-mel spectrogram features matching HuggingFace LasrFeatureExtractor."""
+    # Calculate number of frames using unfold logic
+    num_frames = (len(audio) - win_length) // hop_length + 1
+    if num_frames <= 0:
+        raise ValueError(f"Audio too short: {len(audio)} samples, need at least {win_length}")
 
-    window = np.hanning(win_length).astype(np.float32)
-    filters = create_mel_filterbank(n_mels, n_fft, sample_rate)
+    # Hann window (periodic=False, matching PyTorch)
+    window = np.hanning(win_length).astype(np.float64)
 
-    features = np.zeros((frames, n_mels), dtype=np.float32)
-    for idx in range(frames):
-        start = idx * hop_length
-        frame = audio[start:start + win_length] * window
-        spectrum = np.fft.rfft(frame, n=n_fft)
-        power = (np.abs(spectrum) ** 2).astype(np.float32)
-        mel = np.dot(filters, power)
-        features[idx] = np.log(np.maximum(mel, LOG_FLOOR))
+    # Mel filterbank
+    mel_filters = create_mel_filterbank_hf(n_mels, n_fft, sample_rate,
+                                           LOWER_EDGE_HERTZ, UPPER_EDGE_HERTZ)
+
+    features = np.zeros((num_frames, n_mels), dtype=np.float32)
+
+    for frame in range(num_frames):
+        offset = frame * hop_length
+        windowed = audio[offset:offset + win_length] * window
+
+        # RFFT
+        spectrum = np.fft.rfft(windowed, n=n_fft)
+        power_spec = np.abs(spectrum) ** 2
+
+        # Apply mel filterbank
+        mel_spec = power_spec @ mel_filters
+
+        # Log with floor
+        features[frame] = np.log(np.maximum(mel_spec, LOG_FLOOR))
+
     return features
 
 
 def download_file(url: str, dest: Path) -> None:
+    """Download file from URL to destination."""
     with urllib.request.urlopen(url) as resp, dest.open("wb") as handle:
         handle.write(resp.read())
 
 
-def prepare_model(tmp_dir: Path) -> tuple[Path, Path, Path]:
+def prepare_model(tmp_dir: Path) -> tuple[Path, Path]:
+    """Download model files from HuggingFace."""
     model_path = tmp_dir / "model.onnx"
     data_path = tmp_dir / "model.onnx.data"
-    vocab_path = tmp_dir / "tokenizer.json"
+    vocab_path = tmp_dir / "vocab.json"
 
     base = "https://huggingface.co/jarrelscy/asr1/resolve/main"
+    print("Downloading model files...")
     download_file(f"{base}/model.onnx", model_path)
     download_file(f"{base}/model.onnx.data", data_path)
-    download_file(f"{base}/tokenizer.json", vocab_path)
-    return model_path, data_path, vocab_path
+    download_file(f"{base}/vocab.json", vocab_path)
+    return model_path, vocab_path
 
 
 def load_vocab(path: Path) -> list[str]:
+    """Load vocabulary from vocab.json."""
     data = path.read_text(encoding="utf-8")
-    if data.strip().startswith("{"):
-        payload = json.loads(data)
-        vocab = payload.get("model", {}).get("vocab", [])
-        if isinstance(vocab, list):
-            return [entry[0] for entry in vocab]
-        if isinstance(vocab, dict):
-            id2token = []
-            for token, idx in vocab.items():
-                if idx >= len(id2token):
-                    id2token.extend([""] * (idx - len(id2token) + 1))
-                id2token[idx] = token
-            return id2token
-    id2token = []
-    for line in data.splitlines():
-        if not line.strip():
-            continue
-        token, idx = line.split()
-        id2token.extend([""] * (int(idx) - len(id2token) + 1))
-        id2token[int(idx)] = token
+    vocab = json.loads(data)
+    # vocab.json is token->id mapping, invert it
+    id2token = [""] * (max(vocab.values()) + 1)
+    for token, idx in vocab.items():
+        id2token[idx] = token
     return id2token
 
 
-def decode(ids: list[int], id2token: list[str]) -> str:
-    pieces = []
+def ctc_decode(logits: np.ndarray, id2token: list[str], blank_id: int = 0) -> str:
+    """CTC decoding: argmax, collapse duplicates, remove blanks, decode tokens."""
+    # Argmax
+    argmax = np.argmax(logits, axis=-1)[0]  # Remove batch dim
+
+    # Collapse consecutive duplicates and remove blanks
+    ids = []
+    prev = None
+    for idx in argmax:
+        if idx == blank_id:
+            prev = idx
+            continue
+        if idx != prev:
+            ids.append(int(idx))
+        prev = idx
+
+    # Decode tokens - matches HuggingFace tokenizer.decode behavior
     skip_tokens = {"<epsilon>", "<s>", "</s>", "<unk>"}
+    pieces = []
     for idx in ids:
         if idx < 0 or idx >= len(id2token):
             continue
@@ -147,17 +163,18 @@ def decode(ids: list[int], id2token: list[str]) -> str:
         if token in skip_tokens:
             continue
         pieces.append(token.replace("▁", " "))
-    raw = "".join(pieces)
-    if not raw:
-        return ""
-    return re.sub(r"(^\s|\s\B|(\s)\b)", lambda m: " " if m.group(2) else "", raw)
+
+    # Return raw joined output without cleanup - this is the ground truth
+    return "".join(pieces)
 
 
 def regenerate_transcripts(audio_dir: Path) -> None:
+    """Regenerate transcripts for all WAV files in the given directory."""
     with tempfile.TemporaryDirectory() as temp_dir:
-        model_path, _data_path, vocab_path = prepare_model(Path(temp_dir))
+        model_path, vocab_path = prepare_model(Path(temp_dir))
         id2token = load_vocab(vocab_path)
 
+        print("Loading ONNX model...")
         session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
         input_name = session.get_inputs()[0].name
 
@@ -166,21 +183,22 @@ def regenerate_transcripts(audio_dir: Path) -> None:
             raise SystemExit(f"No .wav files found in {audio_dir}")
 
         for wav_path in wav_files:
-            samples = load_audio(wav_path)
-            features = log_mel_spectrogram(samples, 16000, 512, 400, 160, 128)
-            feats = features[np.newaxis, :, :].astype(np.float32)
-            logits = session.run(None, {input_name: feats})[0]
-            argmax = np.argmax(logits, axis=-1)[0]
-            ids = []
-            prev = None
-            for idx in argmax:
-                if idx == 0:
-                    prev = idx
-                    continue
-                if idx != prev:
-                    ids.append(int(idx))
-                prev = idx
-            text = decode(ids, id2token)
+            # Load audio at 16kHz
+            audio, sr = librosa.load(str(wav_path), sr=16000)
+
+            # Extract features using LasrFeatureExtractor preprocessing
+            features = extract_features(audio)
+
+            # Add batch dimension [1, T, n_mels]
+            features = features[np.newaxis, :, :].astype(np.float32)
+
+            # Run inference
+            logits = session.run(None, {input_name: features})[0]
+
+            # CTC decode
+            text = ctc_decode(logits, id2token, blank_id=0)
+
+            # Write output
             out_path = wav_path.with_suffix(".asr1.txt")
             out_path.write_text(text.strip(), encoding="utf-8")
             print(f"{wav_path.name}:\n{text}\n")
