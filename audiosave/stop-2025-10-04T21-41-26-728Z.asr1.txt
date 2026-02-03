@@ -1,0 +1,1 @@
+[CLINICAL] {colon} {newline} {newline} [TECHNIQUE] {colon} [unintelligible]

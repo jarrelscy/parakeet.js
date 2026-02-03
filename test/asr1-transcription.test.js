@@ -115,61 +115,18 @@ async function getModel() {
     const wasmDirUrl = pathToFileURL(wasmDir).href;
     const wasmUrl = wasmDirUrl.endsWith('/') ? wasmDirUrl : `${wasmDirUrl}/`;
 
-    const localRepo = process.env.PARAKEET_LOCAL_MODEL_DIR;
-    let modelConfig;
-
-    if (localRepo) {
-      const base = path.resolve(projectRoot, localRepo);
-      async function ensure(name) {
-        const filePath = path.join(base, name);
-        try {
-          await fs.access(filePath);
-          return filePath;
-        } catch (err) {
-          if (err.code === 'ENOENT') return null;
-          throw err;
-        }
-      }
-
-      const encoderPath = await ensure('encoder-model.onnx');
-      const encoderDataPath = await ensure('encoder-model.onnx.data');
-      const decoderPath = await ensure('decoder_joint-model.onnx');
-      const vocabPath = await ensure('vocab.txt');
-      const preprocPath = await ensure('nemo128.onnx');
-
-      modelConfig = {
-        urls: {
-          encoderUrl: encoderPath,
-          encoderDataUrl: encoderDataPath,
-          decoderUrl: decoderPath,
-          tokenizerUrl: vocabPath ? pathToFileURL(vocabPath).href : null,
-          preprocessorUrl: preprocPath,
-        },
-        filenames: {
-          encoder: 'encoder-model.onnx',
-          decoder: 'decoder_joint-model.onnx',
-        },
-      };
-
-      if (!encoderPath || !decoderPath || !vocabPath || !preprocPath) {
-        throw new Error(`PARAKEET_LOCAL_MODEL_DIR is missing required files in ${base}`);
-      }
-    } else {
-      modelConfig = await getParakeetModel('jarrelscy/parakeet-tdt-0.6b-v2-onnx', {
-        backend: 'wasm',
-        encoderQuant: 'fp32',
-        decoderQuant: 'fp32',
-      });
-    }
+    const modelConfig = await getParakeetModel('jarrelscy/asr1', {
+      backend: 'wasm',
+    });
 
     modelPromise = ParakeetModel.fromUrls({
       ...modelConfig.urls,
       filenames: modelConfig.filenames,
+      modelType: modelConfig.modelType,
       backend: 'wasm',
       wasmPaths: wasmUrl,
-      decoderQuant: 'fp32',
-      encoderQuant: 'fp32',
-      modelType: modelConfig.modelType,
+      // Use LasrFeatureExtractor-compatible preprocessing (Kaldi mel scale, 125-7500 Hz)
+      medasr: true,
     });
   }
   return modelPromise;
@@ -181,7 +138,7 @@ async function collectAudioPairs() {
   const pairs = [];
   for (const wavFile of wavFiles) {
     const base = wavFile.replace(/\.wav$/, '');
-    const txtFile = `${base}.txt`;
+    const txtFile = `${base}.asr1.txt`;
     const txtPath = path.join(audioDir, txtFile);
     try {
       const expected = await fs.readFile(txtPath, 'utf8');
@@ -193,7 +150,7 @@ async function collectAudioPairs() {
     } catch (err) {
       const guidance = [
         `Missing transcript file for ${wavFile}`,
-        'Run `uv run --with numpy --with onnxruntime --with huggingface-hub --with onnx-asr python scripts/generate_audiosave_transcripts.py` to refresh references.',
+        'Run `python scripts/generate_asr1_transcripts.py` to refresh references.',
       ].join('\n');
       throw new Error(guidance);
     }
@@ -201,7 +158,7 @@ async function collectAudioPairs() {
   return pairs;
 }
 
-test('parakeet wasm transcription matches reference texts', { timeout: 600_000 }, async (t) => {
+test('asr1 wasm transcription matches reference texts', { timeout: 600_000 }, async (t) => {
   let pairs;
   try {
     pairs = await collectAudioPairs();

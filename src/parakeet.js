@@ -1,6 +1,7 @@
 import { initOrt } from './backend.js';
 import { ParakeetTokenizer } from './tokenizer.js';
 import { OnnxPreprocessor } from './preprocessor.js';
+import { LogMelPreprocessor } from './log_mel_preprocessor.js';
 
 /**
  * Lightweight Parakeet model wrapper designed for browser usage.
@@ -10,15 +11,18 @@ import { OnnxPreprocessor } from './preprocessor.js';
  * NOTE: This is an *early* scaffold – the `transcribe` method is TODO.
  */
 export class ParakeetModel {
-  constructor({ tokenizer, encoderSession, joinerSession, preprocessor, ort, subsampling = 8, windowStride = 0.01, normalizer }) {
+  constructor({ tokenizer, encoderSession, joinerSession, ctcSession, preprocessor, ort, subsampling = 8, windowStride = 0.01, normalizer, modelType = 'combined', blankId = null, medasr = false }) {
     this.tokenizer = tokenizer;
     this.encoderSession = encoderSession;
     this.joinerSession = joinerSession;
+    this.ctcSession = ctcSession;
     this.preprocessor = preprocessor;
     this.ort = ort;
+    this.modelType = modelType;
+    this.medasr = medasr;
 
     // Default IDs – may later be read from model metadata.
-    this.blankId = 1024;
+    this.blankId = typeof blankId === 'number' ? blankId : 1024;
 
     // Combined model specific constants
     this.predHidden = 640;
@@ -49,10 +53,13 @@ export class ParakeetModel {
     const {
       encoderUrl,
       decoderUrl,
+      modelUrl,
       tokenizerUrl,
       preprocessorUrl,
+      preprocessorConfigUrl,
       encoderDataUrl,
       decoderDataUrl,
+      modelDataUrl,
       filenames,
       backend = 'webgpu-hybrid',
       wasmPaths,
@@ -62,10 +69,14 @@ export class ParakeetModel {
       enableProfiling = false,
       enableGraphCapture,
       cpuThreads = undefined,
+      modelType: requestedModelType,
+      blankId,
+      medasr = false,
     } = cfg;
 
-    if (!encoderUrl || !decoderUrl || !tokenizerUrl || !preprocessorUrl) {
-      throw new Error('fromUrls requires encoderUrl, decoderUrl, tokenizerUrl and preprocessorUrl');
+    const hasCtcModel = !!modelUrl;
+    if ((!hasCtcModel && (!encoderUrl || !decoderUrl)) || !tokenizerUrl || (!preprocessorUrl && !preprocessorConfigUrl)) {
+      throw new Error('fromUrls requires encoder/decoder or modelUrl, tokenizerUrl, and preprocessorUrl/preprocessorConfigUrl');
     }
 
     // 1. Init ONNX Runtime
@@ -128,18 +139,26 @@ export class ParakeetModel {
     // Create separate options for sessions that might have external data
     const encoderSessionOptions = { ...baseSessionOptions };
     if (encoderDataUrl && filenames?.encoder) {
-        encoderSessionOptions.externalData = [{
-            data: encoderDataUrl,
-            path: filenames.encoder + '.data',
-        }];
+      encoderSessionOptions.externalData = [{
+        data: encoderDataUrl,
+        path: filenames.encoder + '.data',
+      }];
     }
 
     const decoderSessionOptions = { ...baseSessionOptions };
     if (decoderDataUrl && filenames?.decoder) {
-        decoderSessionOptions.externalData = [{
-            data: decoderDataUrl,
-            path: filenames.decoder + '.data',
-        }];
+      decoderSessionOptions.externalData = [{
+        data: decoderDataUrl,
+        path: filenames.decoder + '.data',
+      }];
+    }
+
+    const modelSessionOptions = { ...baseSessionOptions };
+    if (modelDataUrl && filenames?.model) {
+      modelSessionOptions.externalData = [{
+        data: modelDataUrl,
+        path: filenames.model + '.data',
+      }];
     }
 
     // In hybrid mode, the decoder is always run on WASM to avoid per-step
@@ -166,10 +185,14 @@ export class ParakeetModel {
     }
 
     const tokenizerPromise = ParakeetTokenizer.fromUrl(tokenizerUrl);
-    const preprocPromise = Promise.resolve(new OnnxPreprocessor(preprocessorUrl, { backend, wasmPaths, enableProfiling, enableGraphCapture: isFullWasm ? false : graphCaptureEnabled, numThreads: cpuThreads }));
+    const preprocPromise = preprocessorUrl
+      ? Promise.resolve(new OnnxPreprocessor(preprocessorUrl, { backend, wasmPaths, enableProfiling, enableGraphCapture: isFullWasm ? false : graphCaptureEnabled, numThreads: cpuThreads }))
+      : LogMelPreprocessor.fromConfigUrl(preprocessorConfigUrl, { medasr });
 
-    let encoderSession, joinerSession;
-    if (backend === 'webgpu-hybrid') {
+    let encoderSession, joinerSession, ctcSession;
+    if (hasCtcModel) {
+      ctcSession = await createSession(modelUrl, modelSessionOptions);
+    } else if (backend === 'webgpu-hybrid') {
       // avoid parallel create to prevent double initWasm race
       encoderSession = await createSession(encoderUrl, encoderSessionOptions);
       joinerSession = await createSession(decoderUrl, decoderSessionOptions);
@@ -181,14 +204,50 @@ export class ParakeetModel {
     }
 
     const [tokenizer, preprocessor] = await Promise.all([tokenizerPromise, preprocPromise]);
+    const modelType = requestedModelType || (hasCtcModel ? 'ctc' : 'combined');
+    const resolvedBlankId = typeof blankId === 'number'
+      ? blankId
+      : (tokenizer.id2token.indexOf(tokenizer.blankToken) >= 0 ? tokenizer.id2token.indexOf(tokenizer.blankToken) : 0);
 
-    return new ParakeetModel({ tokenizer, encoderSession, joinerSession, preprocessor, ort, subsampling, windowStride });
+    return new ParakeetModel({
+      tokenizer,
+      encoderSession,
+      joinerSession,
+      ctcSession,
+      preprocessor,
+      ort,
+      subsampling,
+      windowStride,
+      modelType,
+      blankId: resolvedBlankId,
+      medasr,
+    });
   }
 
   _createZeroDecoderState() {
     const state1 = new this.ort.Tensor('float32', new Float32Array(this._decoderStateSize), this._decoderStateShape);
     const state2 = new this.ort.Tensor('float32', new Float32Array(this._decoderStateSize), this._decoderStateShape);
     return { state1, state2 };
+  }
+
+  _transposeBctToBtc(features, melBins, frames) {
+    const out = new Float32Array(frames * melBins);
+    for (let m = 0; m < melBins; m++) {
+      for (let t = 0; t < frames; t++) {
+        out[t * melBins + m] = features[m * frames + t];
+      }
+    }
+    return out;
+  }
+
+  _transposeBtcToBct(features, melBins, frames) {
+    const out = new Float32Array(frames * melBins);
+    for (let t = 0; t < frames; t++) {
+      for (let m = 0; m < melBins; m++) {
+        out[m * frames + t] = features[t * melBins + m];
+      }
+    }
+    return out;
   }
 
   async _runCombinedStep(encTensor, token, currentState) {
@@ -232,17 +291,140 @@ export class ParakeetModel {
     return { tokenLogits, step, newState };
   }
 
+  async _transcribeCtc(audio, sampleRate = 16000, opts = {}) {
+    const {
+      returnTimestamps = false,
+      returnConfidences = false,
+      temperature = 1.0,
+    } = opts;
+
+    const perfEnabled = true;
+    let t0, tPreproc = 0, tEncode = 0, tToken = 0;
+    if (perfEnabled) t0 = performance.now();
+
+    let features, T, melBins, layout;
+    if (perfEnabled) {
+      const s = performance.now();
+      ({ features, T, melBins, layout } = await this.computeFeatures(audio, sampleRate));
+      tPreproc = performance.now() - s;
+    } else {
+      ({ features, T, melBins, layout } = await this.computeFeatures(audio, sampleRate));
+    }
+
+    if (layout === 'BCT') {
+      features = this._transposeBctToBtc(features, melBins, T);
+    }
+
+    const input = new this.ort.Tensor('float32', features, [1, T, melBins]);
+    const inputName = this.ctcSession.inputNames?.[0]
+      ?? Object.keys(this.ctcSession.inputMetadata ?? {})[0]
+      ?? 'input_features';
+    const outputName = this.ctcSession.outputNames?.[0]
+      ?? Object.keys(this.ctcSession.outputMetadata ?? {})[0]
+      ?? 'logits';
+
+    let logits;
+    if (perfEnabled) {
+      const s = performance.now();
+      const out = await this.ctcSession.run({ [inputName]: input });
+      tEncode = performance.now() - s;
+      logits = out[outputName] ?? Object.values(out)[0];
+    } else {
+      const out = await this.ctcSession.run({ [inputName]: input });
+      logits = out[outputName] ?? Object.values(out)[0];
+    }
+
+    const [, frames, vocab] = logits.dims;
+    const argmax = new Int32Array(frames);
+    const frameConfs = new Float32Array(frames);
+    const data = logits.data;
+
+    for (let t = 0; t < frames; t++) {
+      let maxVal = -Infinity;
+      let maxId = 0;
+      const base = t * vocab;
+      for (let i = 0; i < vocab; i++) {
+        const v = data[base + i] / temperature;
+        if (v > maxVal) {
+          maxVal = v;
+          maxId = i;
+        }
+      }
+      argmax[t] = maxId;
+      if (returnConfidences) {
+        let sumExp = 0;
+        for (let i = 0; i < vocab; i++) {
+          sumExp += Math.exp((data[base + i] / temperature) - maxVal);
+        }
+        frameConfs[t] = 1 / sumExp;
+      }
+    }
+
+    const ids = [];
+    let prev = null;
+    for (let t = 0; t < frames; t++) {
+      const id = argmax[t];
+      if (id === this.blankId) {
+        prev = id;
+        continue;
+      }
+      if (id !== prev) ids.push(id);
+      prev = id;
+    }
+
+    let tokenStart;
+    if (perfEnabled) tokenStart = performance.now();
+    // For medasr models, use raw decode to match HuggingFace tokenizer.decode output
+    const text = this._normalizer(this.tokenizer.decode(ids, { skipTokens: ['<s>', '</s>', '<unk>'], raw: this.medasr }));
+    if (perfEnabled) tToken = performance.now() - tokenStart;
+
+    const total = perfEnabled ? performance.now() - t0 : null;
+    const metrics = perfEnabled ? {
+      preprocess_ms: +tPreproc.toFixed(1),
+      encode_ms: +tEncode.toFixed(1),
+      tokenize_ms: +tToken.toFixed(1),
+      total_ms: +total.toFixed(1),
+      rtf: +((audio.length / sampleRate) / (total / 1000)).toFixed(2),
+    } : null;
+
+    if (!returnTimestamps && !returnConfidences) {
+      if (perfEnabled) {
+        const audioDur = audio.length / sampleRate;
+        const rtf = audioDur / (total / 1000);
+        console.log(`[Perf] RTF: ${rtf.toFixed(2)}x (audio ${audioDur.toFixed(2)} s, time ${(total/1000).toFixed(2)} s)`);
+        console.table({Preprocess:`${tPreproc.toFixed(1)} ms`, Encode:`${tEncode.toFixed(1)} ms`, Tokenize:`${tToken.toFixed(1)} ms`, Total:`${total.toFixed(1)} ms`});
+      }
+      return { utterance_text: text, words: [], metrics, is_final: true };
+    }
+
+    return {
+      utterance_text: text,
+      words: [],
+      tokens: [],
+      confidence_scores: returnConfidences ? {
+        frame: Array.from(frameConfs, (v) => +v.toFixed(4)),
+        frame_avg: frameConfs.length ? +(Array.from(frameConfs).reduce((a,b)=>a+b,0) / frameConfs.length).toFixed(4) : null,
+        overall_log_prob: null,
+      } : { overall_log_prob: null, frame: null, frame_avg: null },
+      metrics,
+      is_final: true,
+    };
+  }
+
   async computeFeatures(audio, sampleRate = 16000) {
-    const { features, length } = await this.preprocessor.process(audio);
+    const { features, length, featureDim, layout } = await this.preprocessor.process(audio);
     const T = length; // number of frames returned by preprocessor
-    const melBins = features.length / T;
-    return { features, T, melBins };
+    const melBins = featureDim || (features.length / T);
+    return { features, T, melBins, layout };
   }
 
   /**
    * Transcribe 16-kHz mono PCM. Returns full rich output (timestamps/confidences opt-in).
    */
   async transcribe(audio, sampleRate = 16000, opts = {}) {
+    if (this.modelType === 'ctc') {
+      return await this._transcribeCtc(audio, sampleRate, opts);
+    }
     const {
       returnTimestamps = false,
       returnConfidences = false,
@@ -295,13 +477,16 @@ export class ParakeetModel {
     if (perfEnabled) t0 = performance.now();
 
     // 1. Feature extraction (ONNX pre-processor)
-    let features, T, melBins;
+    let features, T, melBins, layout;
     if (perfEnabled) {
       const s = performance.now();
-      ({ features, T, melBins } = await this.computeFeatures(audio, sampleRate));
+      ({ features, T, melBins, layout } = await this.computeFeatures(audio, sampleRate));
       tPreproc = performance.now() - s;
     } else {
-      ({ features, T, melBins } = await this.computeFeatures(audio, sampleRate));
+      ({ features, T, melBins, layout } = await this.computeFeatures(audio, sampleRate));
+    }
+    if (layout === 'BTC') {
+      features = this._transposeBtcToBct(features, melBins, T);
     }
 
     // 2. Encode entire utterance

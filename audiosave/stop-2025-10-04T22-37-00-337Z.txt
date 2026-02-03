@@ -1,1 +1,1 @@
-CLINICAL colon new line new line TECHNIQUE colon new line
+X-ray clinical colon new line- new line technique colon new line
